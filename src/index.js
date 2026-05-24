@@ -1,5 +1,6 @@
 const ResolverModule = require('@forge/resolver');
 const api = require('@forge/api');
+const crypto = require('crypto');
 const { route, storage } = api;
 
 const Resolver = ResolverModule.default || ResolverModule;
@@ -40,11 +41,41 @@ function sanitizeChannel(channel) {
 }
 
 function sanitizeAgentName(agentName) {
-  const value = String(agentName || 'A9 Superchat Incident Agent').trim();
+  const value = String(agentName || 'A9 Superchat Channel Operator').trim();
   if (!value || value.length > 120) {
     throw new Error('agentName must be between 1 and 120 characters');
   }
   return value.replace(/[\r\n]/g, ' ');
+}
+
+function sanitizeNick(nick, fallback = 'guest') {
+  const value = String(nick || fallback).trim().replace(/[^A-Za-z0-9_[\]{}\\`^|-]/g, '');
+  return value.slice(0, 32) || fallback;
+}
+
+function sanitizeText(text, maxLength = 1000) {
+  return String(text || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, maxLength);
+}
+
+function getHeader(headers, name) {
+  const wanted = String(name).toLowerCase();
+  const found = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === wanted);
+  const value = found && found[1];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function validateBotToken(event) {
+  const expected = process.env.SUPERCHAT_BOT_TOKEN;
+  if (!expected) {
+    return true;
+  }
+
+  const actual = getHeader(event && event.headers, 'x-superchat-bot-token');
+  if (!actual || actual.length !== expected.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
 function sanitizeSettings(settings) {
@@ -181,7 +212,7 @@ async function fetchIssueSummary(issueKey) {
 async function queueRelayMessage({ channel, actor, text, issue }) {
   const message = {
     channel: sanitizeChannel(channel),
-    actor: String(actor || 'SuperChat').slice(0, 80),
+    actor: String(actor || 'A9 Superchat').slice(0, 80),
     text: String(text || '').slice(0, 1000),
     issue: issue || null,
     createdAt: new Date().toISOString(),
@@ -224,7 +255,7 @@ async function rovoTriageAction(payload) {
   const text = `[Rovo triage] ${issue.issueKey}: ${question}`;
   return queueRelayMessage({
     channel,
-    actor: 'A9 Superchat Incident Agent',
+    actor: 'A9 Superchat Channel Operator',
     text,
     issue
   });
@@ -273,15 +304,209 @@ resolver.define('summarizeChannel', async ({ payload }) => {
   return rovoChannelSummaryAction(payload);
 });
 
+function jsonResponse(statusCode, body) {
+  return {
+    statusCode,
+    headers: { 'content-type': ['application/json'] },
+    body: JSON.stringify(body)
+  };
+}
+
+function parseJsonBody(event) {
+  if (!event || !event.body) {
+    return {};
+  }
+  if (typeof event.body === 'object') {
+    return event.body;
+  }
+  return JSON.parse(event.body);
+}
+
+function botMessage({ channel, text, target = null }) {
+  return {
+    type: 'irc-message',
+    channel: sanitizeChannel(channel),
+    target,
+    text: sanitizeText(text, 450)
+  };
+}
+
+async function recordBotEnvelope(channel, envelope) {
+  await storage.set(channelAuditKey(channel), {
+    ...envelope,
+    channel,
+    createdAt: new Date().toISOString()
+  });
+}
+
+async function ircCommand(event) {
+  try {
+    if (!validateBotToken(event)) {
+      return jsonResponse(401, { ok: false, error: 'Unauthorized IRC bot callback' });
+    }
+
+    const body = parseJsonBody(event);
+    assertObject(body, 'body');
+    const channel = sanitizeChannel(body.channel || '#a9superchat');
+    const actorNick = sanitizeNick(body.actorNick, 'irc-user');
+    const command = String(body.command || '').trim().replace(/^\//, '').toLowerCase();
+    const args = Array.isArray(body.args) ? body.args.map((arg) => String(arg)) : [];
+
+    await recordBotEnvelope(channel, {
+      type: 'irc-command',
+      actorNick,
+      command,
+      args: args.slice(0, 8).map((arg) => sanitizeText(arg, 160))
+    });
+
+    if (!command || command === 'help') {
+      return jsonResponse(200, {
+        ok: true,
+        actions: [
+          botMessage({
+            channel,
+            target: actorNick,
+            text: 'A9 commands: invite [agent], ask ISSUE-123 question, distill [rca|timeline|handoff|best-practice], help.'
+          })
+        ]
+      });
+    }
+
+    if (command === 'invite') {
+      const agentName = sanitizeAgentName(args.join(' ') || body.agentName);
+      const invite = await queueAgentInvite({ channel, agentName, invitedBy: actorNick });
+      return jsonResponse(202, {
+        ok: true,
+        queued: invite,
+        actions: [
+          botMessage({
+            channel,
+            text: `${invite.agentName} has been invited into ${channel}.`
+          })
+        ]
+      });
+    }
+
+    if (command === 'ask') {
+      const issueKey = args[0] || body.issueKey;
+      const question = sanitizeText(body.question || args.slice(1).join(' '), 700);
+      const queued = await rovoTriageAction({ issueKey, channel, question });
+      return jsonResponse(202, {
+        ok: true,
+        queued,
+        actions: [
+          botMessage({
+            channel,
+            text: queued.text
+          })
+        ]
+      });
+    }
+
+    if (command === 'distill' || command === 'summarize' || command === 'summary') {
+      const format = sanitizeText(body.format || args[0] || 'rca', 60);
+      const queued = await rovoChannelSummaryAction({ channel, format });
+      return jsonResponse(202, {
+        ok: true,
+        queued,
+        actions: [
+          botMessage({
+            channel,
+            text: `Queued ${queued.format} distillation for ${channel}.`
+          })
+        ]
+      });
+    }
+
+    return jsonResponse(400, {
+      ok: false,
+      error: `Unsupported A9 command: ${command}`,
+      actions: [
+        botMessage({
+          channel,
+          target: actorNick,
+          text: `Unsupported A9 command "${sanitizeText(command, 40)}". Try: help, invite, ask, or distill.`
+        })
+      ]
+    });
+  } catch (error) {
+    return jsonResponse(400, {
+      ok: false,
+      error: error.message || 'Invalid IRC command callback'
+    });
+  }
+}
+
+async function ircEvent(event) {
+  try {
+    if (!validateBotToken(event)) {
+      return jsonResponse(401, { ok: false, error: 'Unauthorized IRC bot callback' });
+    }
+
+    const body = parseJsonBody(event);
+    assertObject(body, 'body');
+    const channel = sanitizeChannel(body.channel || '#a9superchat');
+    const type = String(body.type || '').trim().toLowerCase();
+    const actorNick = sanitizeNick(body.actorNick, 'irc-user');
+    const botNick = sanitizeNick(body.botNick, 'A9Rovo');
+
+    await recordBotEnvelope(channel, {
+      type: 'irc-event',
+      eventType: sanitizeText(type, 40),
+      actorNick,
+      botNick,
+      text: sanitizeText(body.text, 1000)
+    });
+
+    if (type === 'join' && actorNick.toLowerCase() !== botNick.toLowerCase()) {
+      return jsonResponse(200, {
+        ok: true,
+        actions: [
+          botMessage({
+            channel,
+            target: actorNick,
+            text: `Welcome to ${channel}. I can invite Rovo agents, ask Jira-grounded triage questions, and distill this channel. Try: help.`
+          })
+        ]
+      });
+    }
+
+    if (type === 'invite') {
+      const invite = await queueAgentInvite({
+        channel,
+        agentName: body.agentName || 'A9 Superchat Channel Operator',
+        invitedBy: actorNick
+      });
+      return jsonResponse(202, {
+        ok: true,
+        queued: invite,
+        actions: [
+          botMessage({
+            channel,
+            text: `${invite.agentName} has been invited into ${channel}.`
+          })
+        ]
+      });
+    }
+
+    return jsonResponse(200, { ok: true, actions: [] });
+  } catch (error) {
+    return jsonResponse(400, {
+      ok: false,
+      error: error.message || 'Invalid IRC event callback'
+    });
+  }
+}
+
 async function incidentIngest(event) {
-  const body = typeof event.body === 'string' && event.body ? JSON.parse(event.body) : {};
+  const body = parseJsonBody(event);
   const channel = sanitizeChannel(body.channel || '#incident');
   const issue = body.issueKey ? await fetchIssueSummary(body.issueKey) : null;
   const question = body.question || 'A high-priority customer issue needs triage. What evidence should support accurate routing?';
 
   const queued = await queueRelayMessage({
     channel,
-    actor: body.actor || 'SuperChat Incident Ingest',
+    actor: body.actor || 'A9 Superchat Incident Ingest',
     text: question,
     issue
   });
@@ -296,12 +521,16 @@ async function incidentIngest(event) {
 module.exports = {
   handler: resolver.getDefinitions(),
   incidentIngest,
+  ircCommand,
+  ircEvent,
   rovoTriageAction,
   rovoChannelSummaryAction,
   _private: {
     sanitizeSettings,
     sanitizeChannel,
     sanitizeAgentName,
+    sanitizeNick,
+    validateBotToken,
     userSettingsKey
   }
 };

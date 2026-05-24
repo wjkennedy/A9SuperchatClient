@@ -35,27 +35,36 @@ modules:
       urlFormat: v2
       response:
         type: dynamic
+    - key: superchat-irc-command
+      function: irc-command
+      urlFormat: v2
+      response:
+        type: dynamic
+    - key: superchat-irc-event
+      function: irc-event
+      urlFormat: v2
+      response:
+        type: dynamic
 
   rovo:agent:
     - key: superchat-incident-agent
-      name: A9 Superchat Incident Agent
-      description: Bridges Jira, Confluence, Rovo, and IRC channels for incident triage.
+      name: A9 Superchat Channel Operator
+      description: Uses A9 Superchat to bring Rovo into IRC incident channels, ask focused triage questions, and distill channel work into RCA or best-practice drafts.
       prompt: resource:rovo-resources;prompts/incident-agent.txt
       conversationStarters:
-        - Invite me to an incident IRC channel
-        - Summarize the active channel into an RCA
-        - Ask engineering what to collect for a P1
+        - Ask #a9superchat what evidence is missing for a Jira incident
+        - Distill #atlassian into an RCA draft
+        - Show how A9 Superchat bridges IRC, Jira, Confluence, and Rovo
       actions:
         - superchat-triage-action
         - superchat-channel-summary-action
 
   action:
     - key: superchat-triage-action
-      name: Ask an IRC channel for incident triage
+      name: Ask A9 Superchat channel
       function: rovo-triage
       actionVerb: GET
-      description: Posts a scoped triage question into a configured IRC channel via
-        the A9 Superchat relay.
+      description: Queues a focused Jira-grounded triage question for an IRC channel in A9 Superchat.
       inputs:
         issueKey:
           title: Jira issue key
@@ -73,11 +82,10 @@ modules:
           required: true
           description: The focused triage question the agent should ask in IRC.
     - key: superchat-channel-summary-action
-      name: Distill an IRC channel
+      name: Distill A9 Superchat channel
       function: rovo-channel-summary
       actionVerb: GET
-      description: Produces an RCA or best-practice draft from retained channel
-        transcript windows.
+      description: Queues channel distillation for RCA, timeline, best-practice, or action-item output.
       inputs:
         channel:
           title: IRC channel
@@ -95,6 +103,10 @@ modules:
       handler: index.handler
     - key: incident-ingest
       handler: index.incidentIngest
+    - key: irc-command
+      handler: index.ircCommand
+    - key: irc-event
+      handler: index.ircEvent
     - key: rovo-triage
       handler: index.rovoTriageAction
     - key: rovo-channel-summary

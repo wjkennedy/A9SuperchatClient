@@ -28,7 +28,7 @@ const DEFAULT_FORM = {
 };
 
 const DEFAULT_AGENT_FORM = {
-  agentName: 'A9 Superchat Incident Agent',
+  agentName: 'A9 Superchat Channel Operator',
   channel: '#p1',
   issueKey: '',
   question: 'What evidence should support accurate triage?',
@@ -43,6 +43,25 @@ const DEFAULT_TESTER = {
   follow: true,
   respondToPings: true
 };
+
+const CONSOLE_STATE_KEY = 'a9-superchat-console-state-v1';
+
+function loadConsoleState() {
+  try {
+    const raw = window.localStorage.getItem(CONSOLE_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function saveConsoleState(state) {
+  try {
+    window.localStorage.setItem(CONSOLE_STATE_KEY, JSON.stringify(state));
+  } catch (err) {
+    // Ignore storage failures; chat should still work without persistence.
+  }
+}
 
 function timestamp() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -103,19 +122,47 @@ function App() {
   const [consoleMessages, setConsoleMessages] = useState([]);
   const [consoleWindows, setConsoleWindows] = useState(['Status']);
   const [consoleNicks, setConsoleNicks] = useState({});
+  const [consoleTopics, setConsoleTopics] = useState({});
+  const [consoleUnread, setConsoleUnread] = useState({});
+  const [consoleMentions, setConsoleMentions] = useState({});
   const [activeConsoleWindow, setActiveConsoleWindow] = useState('Status');
+  const [consoleShouldReconnect, setConsoleShouldReconnect] = useState(false);
   const [message, setMessage] = useState(null);
   const testerSocketRef = useRef(null);
   const consoleSocketRef = useRef(null);
+  const consoleShouldReconnectRef = useRef(false);
+  const reconnectTimerRef = useRef(null);
+  const autoReconnectAttemptedRef = useRef(false);
+  const isUnmountedRef = useRef(false);
+  const [restoreRequested, setRestoreRequested] = useState(false);
+
+  const connectionUrl = useMemo(() => {
+    const protocol = form.defaultUseTls ? 'wss' : 'ws';
+    return `${protocol}://${form.defaultServer}:${form.defaultPort}`;
+  }, [form.defaultServer, form.defaultPort, form.defaultUseTls]);
 
   useEffect(() => {
     let mounted = true;
     invoke('bootstrap')
       .then((data) => {
         if (!mounted) return;
+        const persisted = loadConsoleState();
         setBootstrap(data);
         setForm(normalizeSettings(data.settings));
-        setConsoleNickInput(data.user?.suggestedNick || 'superchat');
+        setConsoleNickInput(persisted?.nickInput || data.user?.suggestedNick || 'superchat');
+        if (persisted?.nick) setConsoleNick(persisted.nick);
+        if (Array.isArray(persisted?.messages)) setConsoleMessages(persisted.messages.slice(-500));
+        if (Array.isArray(persisted?.windows) && persisted.windows.length) setConsoleWindows(persisted.windows);
+        if (persisted?.nicks && typeof persisted.nicks === 'object') setConsoleNicks(persisted.nicks);
+        if (persisted?.topics && typeof persisted.topics === 'object') setConsoleTopics(persisted.topics);
+        if (persisted?.unread && typeof persisted.unread === 'object') setConsoleUnread(persisted.unread);
+        if (persisted?.mentions && typeof persisted.mentions === 'object') setConsoleMentions(persisted.mentions);
+        if (persisted?.activeWindow) setActiveConsoleWindow(persisted.activeWindow);
+        if (persisted?.input) setConsoleInput(persisted.input);
+        if (persisted?.shouldReconnect) {
+          setConsoleShouldReconnect(true);
+          setRestoreRequested(true);
+        }
       })
       .catch((err) => {
         if (!mounted) return;
@@ -131,15 +178,49 @@ function App() {
 
   useEffect(() => {
     return () => {
+      isUnmountedRef.current = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (testerSocketRef.current) testerSocketRef.current.close();
       if (consoleSocketRef.current) consoleSocketRef.current.close();
     };
   }, []);
 
-  const connectionUrl = useMemo(() => {
-    const protocol = form.defaultUseTls ? 'wss' : 'ws';
-    return `${protocol}://${form.defaultServer}:${form.defaultPort}`;
-  }, [form.defaultServer, form.defaultPort, form.defaultUseTls]);
+  useEffect(() => {
+    consoleShouldReconnectRef.current = consoleShouldReconnect;
+  }, [consoleShouldReconnect]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    saveConsoleState({
+      shouldReconnect: consoleShouldReconnect,
+      nick: consoleNick,
+      nickInput: consoleNickInput,
+      input: consoleInput,
+      windows: consoleWindows,
+      nicks: consoleNicks,
+      topics: consoleTopics,
+      unread: consoleUnread,
+      mentions: consoleMentions,
+      activeWindow: activeConsoleWindow,
+      messages: consoleMessages.slice(-500),
+      connectionUrl,
+      savedAt: new Date().toISOString()
+    });
+  }, [
+    activeConsoleWindow,
+    connectionUrl,
+    consoleInput,
+    consoleMessages,
+    consoleMentions,
+    consoleNick,
+    consoleNickInput,
+    consoleNicks,
+    consoleShouldReconnect,
+    consoleTopics,
+    consoleUnread,
+    consoleWindows,
+    isLoading
+  ]);
 
   const testerCode = useMemo(() => {
     const protocols = tester.wsType === 'text'
@@ -174,8 +255,19 @@ function App() {
     setConsoleWindows((current) => current.includes(name) ? current : current.concat(name));
   }
 
+  function markConsoleActivity(target, text) {
+    if (!target || target === activeConsoleWindow) return;
+    setConsoleUnread((current) => ({ ...current, [target]: (current[target] || 0) + 1 }));
+    const lowerText = String(text || '').toLowerCase();
+    const lowerNick = String(consoleNick || '').toLowerCase();
+    if (lowerNick && lowerText.includes(lowerNick)) {
+      setConsoleMentions((current) => ({ ...current, [target]: (current[target] || 0) + 1 }));
+    }
+  }
+
   function addConsoleMessage(target, kind, actor, text) {
     addConsoleWindow(target);
+    markConsoleActivity(target, text);
     setConsoleMessages((current) => current.concat({
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       at: timestamp(),
@@ -224,6 +316,21 @@ function App() {
         nicks.filter((value) => value !== cleanNick)
       ])
     ));
+  }
+
+  function clearConsoleAttention(windowName) {
+    setConsoleUnread((current) => ({ ...current, [windowName]: 0 }));
+    setConsoleMentions((current) => ({ ...current, [windowName]: 0 }));
+  }
+
+  function switchConsoleWindow(windowName) {
+    setActiveConsoleWindow(windowName);
+    clearConsoleAttention(windowName);
+  }
+
+  function setConsoleTopic(channel, topic) {
+    if (!channel) return;
+    setConsoleTopics((current) => ({ ...current, [channel]: topic || '' }));
   }
 
   function consoleSendRaw(line, echoTarget = 'Status') {
@@ -477,6 +584,29 @@ function App() {
       return;
     }
 
+    if (parsed.command === '332') {
+      const channel = parsed.params[1];
+      const topic = parsed.params.slice(2).join(' ');
+      setConsoleTopic(channel, topic);
+      addConsoleMessage(channel, 'system', 'topic', `Topic: ${topic}`);
+      return;
+    }
+
+    if (parsed.command === '331') {
+      const channel = parsed.params[1];
+      setConsoleTopic(channel, '');
+      addConsoleMessage(channel, 'system', 'topic', 'No topic is set.');
+      return;
+    }
+
+    if (parsed.command === 'TOPIC') {
+      const channel = parsed.params[0];
+      const topic = parsed.params.slice(1).join(' ');
+      setConsoleTopic(channel, topic);
+      addConsoleMessage(channel, 'system', 'topic', `${parsed.nick || 'Someone'} changed topic: ${topic}`);
+      return;
+    }
+
     if (parsed.command === 'QUIT') {
       removeConsoleNickEverywhere(parsed.nick);
       addConsoleMessage(activeConsoleWindow, 'system', 'quit', `${parsed.nick || 'Someone'} quit`);
@@ -500,6 +630,11 @@ function App() {
     if (parsed.command === 'PRIVMSG') {
       const target = parsed.params[0] === consoleNick ? parsed.nick : parsed.params[0];
       const text = parsed.params.slice(1).join(' ');
+      if (text.startsWith('\u0001ACTION ') && text.endsWith('\u0001')) {
+        const action = text.slice(8, -1);
+        addConsoleMessage(target || activeConsoleWindow, 'action', '*', `${parsed.nick} ${action}`);
+        return;
+      }
       addConsoleMessage(target || activeConsoleWindow, 'message', parsed.nick, text);
       return;
     }
@@ -518,7 +653,7 @@ function App() {
     addConsoleMessage('Status', 'server', parsed.command || 'server', parsed.raw);
   }
 
-  function connectConsole() {
+  function connectConsole(options = {}) {
     if (consoleSocketRef.current) {
       addConsoleMessage('Status', 'system', 'client', 'Already connected.');
       return;
@@ -527,11 +662,15 @@ function App() {
       .replace(/[^a-zA-Z0-9_\-[\]]/g, '')
       .slice(0, 20);
     const url = connectionUrl;
+    setConsoleShouldReconnect(true);
+    consoleShouldReconnectRef.current = true;
     setConsoleNick(nick);
-    setConsoleMessages([]);
-    setConsoleWindows(['Status']);
-    setConsoleNicks({});
-    setActiveConsoleWindow('Status');
+    if (!options.preserveState) {
+      setConsoleWindows((current) => current.length ? current : ['Status']);
+      setActiveConsoleWindow((current) => current || 'Status');
+      setConsoleUnread({});
+      setConsoleMentions({});
+    }
     setConsoleRegistered(false);
     addConsoleMessage('Status', 'system', 'client', `Connecting to ${url} ...`);
 
@@ -539,6 +678,8 @@ function App() {
       consoleSocketRef.current = new WebSocket(url, ['text.ircv3.net', 'binary.ircv3.net']);
     } catch (err) {
       consoleSocketRef.current = null;
+      setConsoleShouldReconnect(false);
+      consoleShouldReconnectRef.current = false;
       addConsoleMessage('Status', 'error', 'client', err.message);
       return;
     }
@@ -562,6 +703,13 @@ function App() {
       consoleSocketRef.current = null;
       setConsoleConnected(false);
       setConsoleRegistered(false);
+      if (!isUnmountedRef.current && consoleShouldReconnectRef.current) {
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = setTimeout(() => {
+          addConsoleMessage('Status', 'system', 'client', 'Refreshing IRC connection...');
+          connectConsole({ preserveState: true });
+        }, 2500);
+      }
     });
 
     consoleSocketRef.current.addEventListener('error', () => {
@@ -570,8 +718,33 @@ function App() {
   }
 
   function disconnectConsole() {
+    setConsoleShouldReconnect(false);
+    consoleShouldReconnectRef.current = false;
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     if (consoleSocketRef.current) consoleSocketRef.current.close();
+    else addConsoleMessage('Status', 'system', 'client', 'Disconnected.');
   }
+
+  function refreshConsoleConnection() {
+    setConsoleShouldReconnect(true);
+    consoleShouldReconnectRef.current = true;
+    if (consoleSocketRef.current) {
+      addConsoleMessage('Status', 'system', 'client', 'Refreshing IRC connection...');
+      consoleSocketRef.current.close();
+    } else {
+      connectConsole({ preserveState: true });
+    }
+  }
+
+  useEffect(() => {
+    if (isLoading || !restoreRequested || !consoleShouldReconnect || autoReconnectAttemptedRef.current || consoleSocketRef.current) return;
+    autoReconnectAttemptedRef.current = true;
+    setRestoreRequested(false);
+    reconnectTimerRef.current = setTimeout(() => {
+      addConsoleMessage('Status', 'system', 'client', 'Restoring IRC connection...');
+      connectConsole({ preserveState: true });
+    }, 300);
+  }, [consoleShouldReconnect, isLoading, restoreRequested]);
 
   function sendConsoleInput() {
     const text = consoleInput.trim();
@@ -598,6 +771,32 @@ function App() {
         consoleSendRaw(`PRIVMSG ${target} :${body}`, target);
         addConsoleMessage(target, 'message', consoleNick, body);
         setActiveConsoleWindow(target);
+        return;
+      }
+      if (command === 'me' && args.length) {
+        if (activeConsoleWindow !== 'Status') {
+          const body = args.join(' ');
+          consoleSendRaw(`PRIVMSG ${activeConsoleWindow} :\u0001ACTION ${body}\u0001`, activeConsoleWindow);
+          addConsoleMessage(activeConsoleWindow, 'action', '*', `${consoleNick} ${body}`);
+        }
+        return;
+      }
+      if (command === 'topic') {
+        if (activeConsoleWindow !== 'Status') {
+          consoleSendRaw(args.length ? `TOPIC ${activeConsoleWindow} :${args.join(' ')}` : `TOPIC ${activeConsoleWindow}`);
+        }
+        return;
+      }
+      if (command === 'names') {
+        consoleSendRaw(`NAMES ${args[0] || activeConsoleWindow}`);
+        return;
+      }
+      if (command === 'whois' && args[0]) {
+        consoleSendRaw(`WHOIS ${args[0]}`);
+        return;
+      }
+      if (command === 'invite' && args.length >= 2) {
+        consoleSendRaw(`INVITE ${args[0]} ${args[1]}`);
         return;
       }
       if (command === 'raw' || command === 'quote') {
@@ -671,6 +870,7 @@ function App() {
                 <Lozenge appearance={consoleRegistered ? 'inprogress' : 'default'}>
                   {consoleRegistered ? 'registered' : 'not registered'}
                 </Lozenge>
+                {consoleShouldReconnect ? <Lozenge appearance="information">restore on</Lozenge> : null}
                 <Text>{connectionUrl}</Text>
               </Inline>
               <Inline space="space.100" shouldWrap>
@@ -688,6 +888,9 @@ function App() {
                 <Button onClick={disconnectConsole} isDisabled={!consoleConnected}>
                   Disconnect
                 </Button>
+                <Button onClick={refreshConsoleConnection}>
+                  Refresh
+                </Button>
                 <Button onClick={() => setActiveView('setup')}>Setup</Button>
               </Inline>
             </Inline>
@@ -698,10 +901,12 @@ function App() {
                 {consoleWindows.map((windowName) => (
                   <Button
                     key={windowName}
-                    appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
-                    onClick={() => setActiveConsoleWindow(windowName)}
+                  appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
+                    onClick={() => switchConsoleWindow(windowName)}
                   >
                     {windowName}
+                    {consoleMentions[windowName] ? ` @${consoleMentions[windowName]}` : ''}
+                    {!consoleMentions[windowName] && consoleUnread[windowName] ? ` (${consoleUnread[windowName]})` : ''}
                   </Button>
                 ))}
                 <Heading as="h2" size="small">Nicks</Heading>
@@ -712,7 +917,10 @@ function App() {
 
               <Stack space="space.150" grow="fill">
                 <Inline spread="space-between" alignBlock="center" shouldWrap>
-                  <Heading as="h2" size="medium">{activeConsoleWindow}</Heading>
+                  <Stack space="space.050">
+                    <Heading as="h2" size="medium">{activeConsoleWindow}</Heading>
+                    <Text>{consoleTopics[activeConsoleWindow] || (activeConsoleWindow === 'Status' ? 'Connection status and server messages' : 'No topic set')}</Text>
+                  </Stack>
                   <Inline space="space.100" shouldWrap>
                     <Button
                       onClick={inviteAgentToActiveChannel}
@@ -759,7 +967,7 @@ function App() {
               <Button onClick={() => setConsoleInput('/raw ')}>
                 Raw
               </Button>
-              <Text>Commands: /join, /part, /msg, /raw, /quote.</Text>
+              <Text>Commands: /join, /part, /msg, /me, /topic, /names, /whois, /invite, /raw, /quote.</Text>
             </Inline>
           </Stack>
         ) : null}
