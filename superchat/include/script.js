@@ -100,6 +100,8 @@
 
 	// --- DOM ---
 	const loginEl         = document.getElementById('login');
+	const consoleLauncherEl = document.getElementById('console-launcher');
+	const consoleCloseEl = document.getElementById('console-close');
 	const loginServerEl   = document.getElementById('login-server');
 	const loginPortEl     = document.getElementById('login-port');
 	const loginSSLEl      = document.getElementById('login-ssl');
@@ -107,6 +109,21 @@
 	const loginChannelsEl = document.getElementById('login-channels');
 	const loginRememberEl = document.getElementById('login-remember');
 	const loginBtnEl      = document.getElementById('login-btn');
+	const wsTesterNetworkEl = document.getElementById('wstester-network');
+	const wsTesterNickEl = document.getElementById('wstester-nick');
+	const wsTesterTypeTextEl = document.getElementById('wstester-type-text');
+	const wsTesterTypeBinaryEl = document.getElementById('wstester-type-binary');
+	const wsTesterTypeNoneEl = document.getElementById('wstester-type-none');
+	const wsTesterConnectEl = document.getElementById('wstester-connect');
+	const wsTesterDisconnectEl = document.getElementById('wstester-disconnect');
+	const wsTesterApplyEl = document.getElementById('wstester-apply');
+	const wsTesterCopyEl = document.getElementById('wstester-copy');
+	const wsTesterCodeEl = document.getElementById('wstester-code');
+	const wsTesterLogEl = document.getElementById('wstester-log');
+	const wsTesterLineEl = document.getElementById('wstester-line');
+	const wsTesterSendEl = document.getElementById('wstester-send');
+	const wsTesterFollowEl = document.getElementById('wstester-follow');
+	const wsTesterPongsEl = document.getElementById('wstester-pongs');
 	const appEl           = document.getElementById('app');
 	const channelsEl    = document.getElementById('channels');
 	const topicbarEl    = document.getElementById('topicbar');
@@ -118,6 +135,40 @@
 	const toggleNickBtn = document.getElementById('toggle-nicklist');
 	const fontDecBtn = document.getElementById('font-decrease');
 	const fontIncBtn = document.getElementById('font-increase');
+
+	function isConsoleOpen() {
+		return document.body.classList.contains('console-open');
+	}
+
+	function focusConsole() {
+		if (appEl.classList.contains('hidden')) loginNickEl.focus();
+		else inputEl.focus();
+	}
+
+	function openConsole() {
+		document.body.classList.add('console-open');
+		document.body.classList.remove('console-closed');
+		focusConsole();
+	}
+
+	function closeConsole() {
+		document.body.classList.add('console-closed');
+		document.body.classList.remove('console-open');
+		if (document.activeElement && typeof document.activeElement.blur === 'function') {
+			document.activeElement.blur();
+		}
+	}
+
+	function toggleConsole() {
+		if (isConsoleOpen()) closeConsole();
+		else openConsole();
+	}
+
+	function isEditableTarget(target) {
+		if (!target) return false;
+		const tag = target.tagName;
+		return target.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+	}
 
 	// --- Nick colors (LRU cache, 1000 max) ---
 	function hashStr(s) {
@@ -1020,6 +1071,214 @@
 	}
 
 	// ============================================================
+	//  WebSocket tester
+	// ============================================================
+	let wsTesterSocket = null;
+
+	function wsTesterClearLog() {
+		wsTesterLogEl.textContent = '';
+	}
+
+	function wsTesterAddLine(line) {
+		wsTesterLogEl.textContent += line + '\n';
+		if (wsTesterFollowEl.checked) {
+			wsTesterLogEl.scrollTop = wsTesterLogEl.scrollHeight;
+		}
+	}
+
+	function wsTesterClientLine(line) {
+		wsTesterAddLine(' -> ' + line);
+	}
+
+	function wsTesterServerLine(line) {
+		wsTesterAddLine('<-  ' + line);
+	}
+
+	function wsTesterProtocols() {
+		if (wsTesterTypeTextEl.checked) return ['text.ircv3.net', 'binary.ircv3.net'];
+		if (wsTesterTypeBinaryEl.checked) return ['binary.ircv3.net', 'text.ircv3.net'];
+		if (wsTesterTypeNoneEl.checked) return [];
+		return null;
+	}
+
+	function wsTesterExampleCode() {
+		const wssUrl = wsTesterNetworkEl.value.trim() || 'wss://ws.example.org';
+		const protocols = wsTesterProtocols();
+		const nickValue = wsTesterNickEl.value.trim() || 'dan';
+		let code = "let socket = new WebSocket('" + wssUrl + "'";
+		if (protocols && protocols.length) {
+			code += ', [' + protocols.map(function (proto) { return "'" + proto + "'"; }).join(', ') + ']';
+		}
+		code += ');\n';
+		code += "socket.addEventListener('open', () => {\n";
+		code += "  socket.send('NICK " + nickValue + "');\n";
+		code += "  socket.send('USER 0 0 0 0');\n";
+		code += '});\n';
+		code += "socket.addEventListener('message', async e => {\n";
+		code += '  var line = e.data;\n';
+		code += '  if (line instanceof Blob) {\n';
+		code += '    line = await e.data.text();\n';
+		code += '  }\n';
+		code += '  processLine(line);\n';
+		code += '});';
+		return code;
+	}
+
+	function wsTesterUpdateCode() {
+		wsTesterCodeEl.textContent = wsTesterExampleCode();
+	}
+
+	function wsTesterSetConnectedState(isConnected) {
+		wsTesterConnectEl.disabled = isConnected;
+		wsTesterDisconnectEl.disabled = !isConnected;
+		wsTesterSendEl.disabled = !isConnected;
+	}
+
+	function wsTesterDisconnect() {
+		if (!wsTesterSocket) return;
+		wsTesterSocket.close();
+	}
+
+	function wsTesterSendLine(line) {
+		if (!wsTesterSocket || wsTesterSocket.readyState !== WebSocket.OPEN) {
+			wsTesterAddLine('[ircws-tester] Not connected.');
+			return;
+		}
+		wsTesterSocket.send(line);
+		wsTesterClientLine(line);
+	}
+
+	function wsTesterRespondToPing(rawLine) {
+		let line = rawLine;
+		if (!wsTesterPongsEl.checked || !wsTesterSocket || wsTesterSocket.readyState !== WebSocket.OPEN) return;
+		if (line.startsWith('@')) line = line.substring(line.indexOf(' ') + 1).trimStart();
+		if (line.startsWith(':')) line = line.substring(line.indexOf(' ') + 1).trimStart();
+		const spaceIdx = line.indexOf(' ');
+		const cmd = (spaceIdx === -1 ? line : line.substring(0, spaceIdx)).trim().toUpperCase();
+		const rest = spaceIdx === -1 ? '' : line.substring(spaceIdx + 1).trimStart();
+		if (cmd === 'PING') {
+			const reply = 'PONG ' + rest;
+			wsTesterSocket.send(reply);
+			wsTesterClientLine(reply);
+		}
+	}
+
+	function wsTesterConnect() {
+		if (wsTesterSocket) {
+			wsTesterAddLine('[ircws-tester] Already connected. Disconnect before reconnecting.');
+			return;
+		}
+		const protocols = wsTesterProtocols();
+		if (!protocols) {
+			wsTesterAddLine('[ircws-tester] Invalid WebSocket type selected.');
+			return;
+		}
+		wsTesterClearLog();
+		wsTesterAddLine('[ircws-tester] Connecting...');
+		try {
+			wsTesterSocket = protocols.length
+				? new WebSocket(wsTesterNetworkEl.value.trim(), protocols)
+				: new WebSocket(wsTesterNetworkEl.value.trim());
+		} catch (err) {
+			wsTesterSocket = null;
+			wsTesterAddLine('[ircws-tester] ' + err.message);
+			wsTesterSetConnectedState(false);
+			return;
+		}
+		wsTesterSetConnectedState(true);
+
+		wsTesterSocket.addEventListener('open', function () {
+			wsTesterAddLine('[ircws-tester] Connected using WS protocol [' + wsTesterSocket.protocol + ']');
+			const nickValue = wsTesterNickEl.value.trim();
+			if (!nickValue) {
+				wsTesterAddLine('[ircws-tester] Start typing IRC protocol lines.');
+				return;
+			}
+			wsTesterSendLine('USER 0 0 0 0');
+			wsTesterSendLine('NICK ' + nickValue);
+		});
+
+		wsTesterSocket.addEventListener('message', async function (e) {
+			let line = e.data;
+			if (line instanceof Blob) line = await e.data.text();
+			String(line).split(/\r?\n/).filter(Boolean).forEach(function (part) {
+				wsTesterServerLine(part);
+				wsTesterRespondToPing(part);
+			});
+		});
+
+		wsTesterSocket.addEventListener('close', function (e) {
+			wsTesterAddLine(e.reason
+				? '[ircws-tester] Connection closed (' + e.reason + ')'
+				: '[ircws-tester] Connection closed');
+			wsTesterSocket = null;
+			wsTesterSetConnectedState(false);
+		});
+
+		wsTesterSocket.addEventListener('error', function () {
+			wsTesterAddLine("[ircws-tester] WebSocket error. Try another WS type, check Forge CSP egress, or verify the server's allowed origins.");
+		});
+	}
+
+	function wsTesterApplyToLogin() {
+		let url;
+		try {
+			url = new URL(wsTesterNetworkEl.value.trim());
+		} catch (err) {
+			wsTesterAddLine('[ircws-tester] Enter a valid ws:// or wss:// URL before applying.');
+			return;
+		}
+		loginServerEl.value = url.hostname;
+		loginPortEl.value = url.port || (url.protocol === 'wss:' ? '443' : '80');
+		loginSSLEl.checked = url.protocol === 'wss:';
+		if (wsTesterNickEl.value.trim()) loginNickEl.value = wsTesterNickEl.value.trim();
+	}
+
+	function wsTesterCopyExample() {
+		const text = wsTesterExampleCode();
+		if (navigator.clipboard && navigator.clipboard.writeText) {
+			navigator.clipboard.writeText(text).catch(function () {
+				wsTesterAddLine('[ircws-tester] Clipboard write failed.');
+			});
+		} else {
+			wsTesterAddLine('[ircws-tester] Clipboard API is unavailable in this frame.');
+		}
+	}
+
+	function wsTesterInit() {
+		wsTesterUpdateCode();
+		wsTesterSetConnectedState(false);
+		Array.prototype.forEach.call(document.getElementsByClassName('wstester-preset'), function (button) {
+			button.addEventListener('click', function () {
+				wsTesterNetworkEl.value = button.dataset.url;
+				wsTesterTypeTextEl.checked = button.dataset.wstype === 'text';
+				wsTesterTypeBinaryEl.checked = button.dataset.wstype === 'binary';
+				wsTesterTypeNoneEl.checked = button.dataset.wstype === 'none';
+				wsTesterUpdateCode();
+			});
+		});
+		[wsTesterNetworkEl, wsTesterNickEl, wsTesterTypeTextEl, wsTesterTypeBinaryEl, wsTesterTypeNoneEl].forEach(function (el) {
+			el.addEventListener('change', wsTesterUpdateCode);
+			el.addEventListener('input', wsTesterUpdateCode);
+		});
+		wsTesterConnectEl.addEventListener('click', wsTesterConnect);
+		wsTesterDisconnectEl.addEventListener('click', wsTesterDisconnect);
+		wsTesterApplyEl.addEventListener('click', wsTesterApplyToLogin);
+		wsTesterCopyEl.addEventListener('click', wsTesterCopyExample);
+		wsTesterSendEl.addEventListener('click', function () {
+			const line = wsTesterLineEl.value;
+			if (!line) return;
+			wsTesterSendLine(line);
+			wsTesterLineEl.value = '';
+		});
+		wsTesterLineEl.addEventListener('keydown', function (e) {
+			if (e.key !== 'Enter') return;
+			e.preventDefault();
+			wsTesterSendEl.click();
+		});
+	}
+
+	// ============================================================
 	//  Login
 	// ============================================================
 	function doLogin() {
@@ -1108,8 +1367,26 @@
 
 	// Load saved settings on page load
 	loadSavedSettings();
+	wsTesterInit();
 
 	loginBtnEl.addEventListener('click', doLogin);
+	consoleLauncherEl.addEventListener('click', openConsole);
+	consoleCloseEl.addEventListener('click', closeConsole);
+
+	document.addEventListener('keydown', function (e) {
+		const isConsoleKey = e.key === '`' || e.key === '~' || e.code === 'Backquote';
+		if (e.key === 'Escape' && isConsoleOpen()) {
+			closeConsole();
+			e.preventDefault();
+			return;
+		}
+		if (!isConsoleKey) return;
+		if (isEditableTarget(e.target) && !e.ctrlKey && !e.metaKey) return;
+
+		toggleConsole();
+		e.preventDefault();
+	});
+
 	loginNickEl.addEventListener('keydown', function (e) {
 		if (e.key === 'Enter') doLogin();
 	});

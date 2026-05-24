@@ -1,0 +1,134 @@
+app:
+  id: ari:cloud:ecosystem::app/ff573101-2609-4a69-9c7f-992ffca28401
+  runtime:
+    name: nodejs22.x
+
+modules:
+  jira:globalPage:
+    - key: superchat-jira-global
+      resource: superchat-native
+      render: native
+      resolver:
+        function: resolver
+      title: A9 Superchat
+
+  confluence:globalPage:
+    - key: superchat-confluence-global
+      resource: superchat-native
+      render: native
+      route: superchat
+      resolver:
+        function: resolver
+      title: A9 Superchat
+
+  jira:adminPage:
+    - key: superchat-jira-admin
+      resource: superchat-native
+      render: native
+      resolver:
+        function: resolver
+      title: A9 Superchat Admin
+
+  webtrigger:
+    - key: superchat-incident-ingest
+      function: incident-ingest
+      urlFormat: v2
+      response:
+        type: dynamic
+
+  rovo:agent:
+    - key: superchat-incident-agent
+      name: A9 Superchat Incident Agent
+      description: Bridges Jira, Confluence, Rovo, and IRC channels for incident triage.
+      prompt: resource:rovo-resources;prompts/incident-agent.txt
+      conversationStarters:
+        - Invite me to an incident IRC channel
+        - Summarize the active channel into an RCA
+        - Ask engineering what to collect for a P1
+      actions:
+        - superchat-triage-action
+        - superchat-channel-summary-action
+
+  action:
+    - key: superchat-triage-action
+      name: Ask an IRC channel for incident triage
+      function: rovo-triage
+      actionVerb: GET
+      description: Posts a scoped triage question into a configured IRC channel via
+        the A9 Superchat relay.
+      inputs:
+        issueKey:
+          title: Jira issue key
+          type: string
+          required: true
+          description: The Jira issue key to use for incident context, for example CS-123.
+        channel:
+          title: IRC channel
+          type: string
+          required: true
+          description: The IRC channel where the triage question should be posted.
+        question:
+          title: Question
+          type: string
+          required: true
+          description: The focused triage question the agent should ask in IRC.
+    - key: superchat-channel-summary-action
+      name: Distill an IRC channel
+      function: rovo-channel-summary
+      actionVerb: GET
+      description: Produces an RCA or best-practice draft from retained channel
+        transcript windows.
+      inputs:
+        channel:
+          title: IRC channel
+          type: string
+          required: true
+          description: The IRC channel whose retained transcript should be summarized.
+        format:
+          title: Output format
+          type: string
+          required: false
+          description: The requested summary format, such as rca or best-practice.
+
+  function:
+    - key: resolver
+      handler: index.handler
+    - key: incident-ingest
+      handler: index.incidentIngest
+    - key: rovo-triage
+      handler: index.rovoTriageAction
+    - key: rovo-channel-summary
+      handler: index.rovoChannelSummaryAction
+
+resources:
+  - key: superchat-native
+    path: src/frontend/index.jsx
+  - key: rovo-resources
+    path: resources/rovo
+
+permissions:
+  scopes:
+    - storage:app
+    - read:jira-user
+    - read:jira-work
+    - read:confluence-user
+    - read:confluence-content.summary
+    - read:chat:rovo
+  external:
+    fetch:
+      backend:
+        - address: "wss://irc.unrealircd.org:8000"
+          inScopeEUD: true
+        - address: "*.superchat-relay.example.com"
+          inScopeEUD: true
+      client:
+        - address: "wss://testnet.ergo.chat"
+          inScopeEUD: true
+        - address: "wss://testnet.inspircd.org:8097"
+          inScopeEUD: true
+        - address: "wss://irc.unrealircd.org:7000"
+          inScopeEUD: true
+        - address: "wss://irc.unrealircd.org:8000"
+          inScopeEUD: true
+        - address: "*.superchat-relay.example.com"
+          inScopeEUD: true

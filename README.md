@@ -1,81 +1,104 @@
-# SuperCHAT
+# A9 Superchat
 
-> Bare minimal websockets based IRC client
+A9 Superchat is a Forge-native IRC client for Jira and Confluence, built around UI Kit surfaces, Jira/Confluence identity, Rovo agent workflows, and IRC over WebSocket.
 
-**Live Demo:** [https://webchat.supernets.org](https://webchat.supernets.org)
+The app brings IRC-style incident collaboration into Atlassian Cloud while keeping the important operational actions close to the chat: invite an agent, ask a triage question, distill a channel, and preserve bounded audit events for later RCA work.
 
-![Preview](.screens/preview.png)
+## Current Features
 
-A client-side JavaScript IRC client that connects through WebSocket gateways. No backend, no build process, no dependencies - just open it in a browser. It handles standard IRC protocol features, supports multiple channels, tracks highlights across all your conversations, and works on mobile. The interface uses monospace fonts for proper display of ASCII art and code.
+- Native Forge UI Kit app shell for Jira and Confluence.
+- Native IRC console with channel navigation, active-channel nick list, streaming transcript log, and bottom message entry.
+- WebSocket IRC connection support for declared WSS origins.
+- Editable IRC nick prefilled from Atlassian identity.
+- Default channels: `#a9superchat` and `#atlassian`.
+- Native WebSocket tester in Setup with Ergo, InspIRCd, and UnrealIRCd presets.
+- Forge storage-backed user settings.
+- Rovo agent workflows from the chat context:
+  - invite an agent to the active channel
+  - ask a Jira-grounded triage question
+  - queue channel distillation for RCA or best-practice output
+- Resolver-backed validation and audit/queue envelopes for agent actions.
+- Rovo action module stubs for agent-driven triage and channel summaries.
 
-## Features
-- Pure client-side *(runs entirely in browser)*
-- Multi-channel & private message support
-- IRCv3 capabilities *(server-time, batch, message-tags, chat history)*
-- Highlight tracking with audio & desktop notifications
-- Full mIRC color code support for formatted text
-- Mobile responsive with adjustable font sizes
-- Connect to any WebSocket-enabled IRC network
-- Cookie-based settings persistence
-- Auto-reconnect when disconnected
-- Toggle chan/nick list boxes and adjustable font size on mobile
+## Forge Surfaces
 
-## WebSocket Requirement
+- Jira global page: main A9 Superchat client.
+- Confluence global page: same native app shell for Confluence users.
+- Jira admin page: native configuration surface.
+- Web trigger: incident intake entry point.
+- Rovo agent/actions: incident triage and channel summary workflows.
 
-**Important:** This client requires IRC networks with WebSocket gateway support. Standard IRC ports *(6667/6697)* will not work. You need a WebSocket-enabled port, typically 7000, 8080, or similar.
+## Project Layout
 
-## UnrealIRCd setup for Websockets
-
-#### Create a listen block for websocket connections over TLS
-```
-listen {
-    ip *;
-    port 7000;
-    options {
-        tls;
-        websocket { type text; }
-    };
-    tls-options {
-        certificate "tls/irc.crt";
-        key "tls/irc.key";
-		options { no-client-certificate; }
-    };
-};
+```text
+src/
+  index.js              # Forge resolvers, storage, Rovo actions, web trigger handlers
+  frontend/index.jsx    # Native UI Kit app shell and IRC console
+resources/rovo/         # Rovo prompt resources
+tests/                  # Jest resolver tests
+superchat/              # Original static client retained as reference code
+manifest.yml            # Forge modules, resources, scopes, egress
+deploy-production.sh
 ```
 
-**Note:** The `no-client-certificate` is required to allow Chrome based browsers to connect. This is not required for Firefox though.
+## Development
 
-#### Load required modules
-
-```
-loadmodule "webserver";
-loadmodule "websocket";
-loadmodule "websocket_common";
+```sh
+npm install
+npm test
+npm run lint
 ```
 
-### SSL/TLS & HTTPS Requirement
+Deploy to Forge:
 
-**Important:** Browsers will not allow WSS (secure WebSocket) connections from non-HTTPS pages. If you're hosting this client over HTTP, you'll only be able to connect to WS (insecure) WebSocket servers, which most browsers restrict or block entirely.
+```sh
+forge deploy
+forge install
+```
 
-To connect to secure WSS servers, either:
-1. Host the client on HTTPS
-2. Use a reverse proxy (nginx, caddy, etc.) to serve the client over HTTPS and proxy WebSocket connections
+Production helper:
 
-When using a reverse proxy, ensure it forwards the client's real IP address (use `X-Forwarded-For` or `X-Real-IP` headers) so IRC servers don't see all connections coming from your proxy's IP.
+```sh
+./deploy-production.sh
+```
 
-### Help Build the Network List
+## WebSocket And CSP Notes
 
-We're creating a dropdown list of WebSocket-enabled IRC networks for easy connection. If your network supports WebSockets, [open an issue on GitHub](https://github.com/supernets/superchat/issues) with the following details:
-- Network name
-- WebSocket server address & port
-- SSL/TLS support status
-- Suggested default channels *(optional)*
+Forge frontend CSP only permits browser WebSocket connections to hosts declared in `permissions.external.fetch.client`.
 
-Your contribution helps make IRC more accessible to browser-based users!
+The current manifest includes:
 
-### GrapheneOS Note
-If using GrapheneOS/Vanadium browser, you must enable JIT permissions for WebSocket connections to work properly.
+- `wss://testnet.ergo.chat`
+- `wss://testnet.inspircd.org:8097`
+- `wss://irc.unrealircd.org:7000`
+- `wss://irc.unrealircd.org:8000`
+- `*.superchat-relay.example.com`
 
----
+For arbitrary IRC networks, use the planned relay instead of adding every network directly to the manifest. The relay is also the right boundary for persistent sessions, DCC-style file sharing, MCP tool calls, and cross-agent bridge work.
 
-###### Mirrors: [SuperNETs](https://git.supernets.org/supernets/superchat) • [GitHub](https://github.com/supernets/superchat) • [GitLab](https://gitlab.com/supernets/superchat) • [Codeberg](https://codeberg.org/supernets/superchat)
+## Testing
+
+```sh
+npm test
+```
+
+The test suite covers:
+
+- settings sanitization
+- unsafe relay URL rejection
+- Jira-backed Rovo triage queueing
+- Jira identity bootstrap
+- agent invite queueing
+- invite blocking when disabled
+- channel summary queueing
+
+## Architecture
+
+See [docs/forge-native-irc-architecture.md](docs/forge-native-irc-architecture.md) for the current architecture notes, including relay boundaries, Rovo/MCP/IRC bot responsibilities, file-sharing constraints, and future hardening work.
+
+## Known Limits
+
+- The native UI Kit console intentionally starts with a bounded IRC feature set.
+- mIRC colors, command history, scrollback search, richer channel mode handling, and advanced nick UX still need to be moved over from the original static client.
+- Direct browser WSS works only for manifest-declared hosts.
+- Long-lived production IRC sessions should move behind a remote relay.

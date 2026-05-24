@@ -1,0 +1,1042 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import ForgeReconciler, {
+  Box,
+  Button,
+  Checkbox,
+  CodeBlock,
+  Heading,
+  Inline,
+  Label,
+  Lozenge,
+  SectionMessage,
+  Spinner,
+  Stack,
+  Text,
+  Textfield
+} from '@forge/react';
+import { invoke } from '@forge/bridge';
+
+const DEFAULT_FORM = {
+  relayUrl: '',
+  defaultServer: 'irc.unrealircd.org',
+  defaultPort: 8000,
+  defaultUseTls: true,
+  defaultChannels: '#a9superchat,#atlassian',
+  transcriptRetentionDays: 14,
+  allowRovoInvites: true,
+  allowDccProxy: false
+};
+
+const DEFAULT_AGENT_FORM = {
+  agentName: 'A9 Superchat Incident Agent',
+  channel: '#p1',
+  issueKey: '',
+  question: 'What evidence should support accurate triage?',
+  summaryFormat: 'rca'
+};
+
+const DEFAULT_TESTER = {
+  url: 'wss://irc.unrealircd.org:8000',
+  nick: '',
+  wsType: 'text',
+  rawLine: '',
+  follow: true,
+  respondToPings: true
+};
+
+function timestamp() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function parseIrcLine(rawLine) {
+  let line = String(rawLine || '');
+  if (line.startsWith('@')) line = line.substring(line.indexOf(' ') + 1).trimStart();
+  let prefix = '';
+  if (line.startsWith(':')) {
+    const spaceIndex = line.indexOf(' ');
+    prefix = line.substring(1, spaceIndex);
+    line = line.substring(spaceIndex + 1).trimStart();
+  }
+  const trailingIndex = line.indexOf(' :');
+  let trailing = '';
+  if (trailingIndex !== -1) {
+    trailing = line.substring(trailingIndex + 2);
+    line = line.substring(0, trailingIndex);
+  }
+  const parts = line.split(' ').filter(Boolean);
+  return {
+    prefix,
+    nick: prefix.split('!')[0],
+    command: (parts.shift() || '').toUpperCase(),
+    params: trailing ? parts.concat(trailing) : parts,
+    raw: rawLine
+  };
+}
+
+function normalizeSettings(settings) {
+  return {
+    ...DEFAULT_FORM,
+    ...settings,
+    defaultChannels: Array.isArray(settings?.defaultChannels)
+      ? settings.defaultChannels.join(',')
+      : settings?.defaultChannels || DEFAULT_FORM.defaultChannels
+  };
+}
+
+function App() {
+  const [activeView, setActiveView] = useState('console');
+  const [bootstrap, setBootstrap] = useState(null);
+  const [form, setForm] = useState(DEFAULT_FORM);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [agentForm, setAgentForm] = useState(DEFAULT_AGENT_FORM);
+  const [agentBusyAction, setAgentBusyAction] = useState(null);
+  const [agentResult, setAgentResult] = useState(null);
+  const [tester, setTester] = useState(DEFAULT_TESTER);
+  const [testerLog, setTesterLog] = useState('... irc lines will go here ...');
+  const [testerConnected, setTesterConnected] = useState(false);
+  const [consoleConnected, setConsoleConnected] = useState(false);
+  const [consoleRegistered, setConsoleRegistered] = useState(false);
+  const [consoleNick, setConsoleNick] = useState('');
+  const [consoleNickInput, setConsoleNickInput] = useState('');
+  const [consoleInput, setConsoleInput] = useState('');
+  const [consoleMessages, setConsoleMessages] = useState([]);
+  const [consoleWindows, setConsoleWindows] = useState(['Status']);
+  const [consoleNicks, setConsoleNicks] = useState({});
+  const [activeConsoleWindow, setActiveConsoleWindow] = useState('Status');
+  const [message, setMessage] = useState(null);
+  const testerSocketRef = useRef(null);
+  const consoleSocketRef = useRef(null);
+
+  useEffect(() => {
+    let mounted = true;
+    invoke('bootstrap')
+      .then((data) => {
+        if (!mounted) return;
+        setBootstrap(data);
+        setForm(normalizeSettings(data.settings));
+        setConsoleNickInput(data.user?.suggestedNick || 'superchat');
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setMessage({ appearance: 'error', text: err.message || 'Failed to load A9 Superchat settings.' });
+      })
+      .finally(() => {
+        if (mounted) setIsLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (testerSocketRef.current) testerSocketRef.current.close();
+      if (consoleSocketRef.current) consoleSocketRef.current.close();
+    };
+  }, []);
+
+  const connectionUrl = useMemo(() => {
+    const protocol = form.defaultUseTls ? 'wss' : 'ws';
+    return `${protocol}://${form.defaultServer}:${form.defaultPort}`;
+  }, [form.defaultServer, form.defaultPort, form.defaultUseTls]);
+
+  const testerCode = useMemo(() => {
+    const protocols = tester.wsType === 'text'
+      ? ", ['text.ircv3.net', 'binary.ircv3.net']"
+      : tester.wsType === 'binary'
+        ? ", ['binary.ircv3.net', 'text.ircv3.net']"
+        : '';
+    const nick = tester.nick || 'dan';
+    return [
+      `let socket = new WebSocket('${tester.url || 'wss://ws.example.org'}'${protocols});`,
+      "socket.addEventListener('open', () => {",
+      `  socket.send('NICK ${nick}');`,
+      "  socket.send('USER 0 0 0 0');",
+      '});',
+      "socket.addEventListener('message', async e => {",
+      '  var line = e.data;',
+      '  if (line instanceof Blob) line = await e.data.text();',
+      '  processLine(line);',
+      '});'
+    ].join('\n');
+  }, [tester.nick, tester.url, tester.wsType]);
+
+  function updateField(name, value) {
+    setForm((current) => ({ ...current, [name]: value }));
+  }
+
+  function updateTesterField(name, value) {
+    setTester((current) => ({ ...current, [name]: value }));
+  }
+
+  function addConsoleWindow(name) {
+    setConsoleWindows((current) => current.includes(name) ? current : current.concat(name));
+  }
+
+  function addConsoleMessage(target, kind, actor, text) {
+    addConsoleWindow(target);
+    setConsoleMessages((current) => current.concat({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: timestamp(),
+      target,
+      kind,
+      actor,
+      text
+    }).slice(-500));
+  }
+
+  function addConsoleNick(channel, nick) {
+    if (!channel || !nick) return;
+    const cleanNick = String(nick).replace(/^[~&@%+]+/, '');
+    setConsoleNicks((current) => {
+      const existing = current[channel] || [];
+      if (existing.includes(cleanNick)) return current;
+      return { ...current, [channel]: existing.concat(cleanNick).sort((a, b) => a.localeCompare(b)) };
+    });
+  }
+
+  function setConsoleNickList(channel, nicks) {
+    if (!channel) return;
+    const cleanNicks = nicks
+      .map((nick) => String(nick).replace(/^[~&@%+]+/, ''))
+      .filter(Boolean)
+      .filter((nick, index, list) => list.indexOf(nick) === index)
+      .sort((a, b) => a.localeCompare(b));
+    setConsoleNicks((current) => ({ ...current, [channel]: cleanNicks }));
+  }
+
+  function removeConsoleNick(channel, nick) {
+    if (!channel || !nick) return;
+    const cleanNick = String(nick).replace(/^[~&@%+]+/, '');
+    setConsoleNicks((current) => ({
+      ...current,
+      [channel]: (current[channel] || []).filter((value) => value !== cleanNick)
+    }));
+  }
+
+  function removeConsoleNickEverywhere(nick) {
+    const cleanNick = String(nick || '').replace(/^[~&@%+]+/, '');
+    if (!cleanNick) return;
+    setConsoleNicks((current) => Object.fromEntries(
+      Object.entries(current).map(([channel, nicks]) => [
+        channel,
+        nicks.filter((value) => value !== cleanNick)
+      ])
+    ));
+  }
+
+  function consoleSendRaw(line, echoTarget = 'Status') {
+    const socket = consoleSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      addConsoleMessage('Status', 'error', 'client', 'Not connected.');
+      return false;
+    }
+    socket.send(`${line}\r\n`);
+    addConsoleMessage(echoTarget, 'outbound', consoleNick || 'me', `-> ${line}`);
+    return true;
+  }
+
+  async function saveSettings() {
+    setIsSaving(true);
+    setMessage(null);
+    try {
+      const settings = {
+        ...form,
+        defaultPort: Number(form.defaultPort),
+        transcriptRetentionDays: Number(form.transcriptRetentionDays),
+        defaultChannels: String(form.defaultChannels)
+          .split(',')
+          .map((channel) => channel.trim())
+          .filter(Boolean)
+      };
+      const result = await invoke('saveSettings', { settings });
+      setForm(normalizeSettings(result.settings));
+      setMessage({ appearance: 'confirmation', text: 'Settings saved for your Atlassian account.' });
+    } catch (err) {
+      setMessage({ appearance: 'error', text: err.message || 'Unable to save settings.' });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function updateAgentField(name, value) {
+    setAgentForm((current) => ({ ...current, [name]: value }));
+  }
+
+  async function runAgentAction(actionName, payload) {
+    setAgentBusyAction(actionName);
+    setAgentResult(null);
+    setMessage(null);
+    try {
+      const result = await invoke(actionName, payload);
+      setAgentResult(result);
+      setMessage({ appearance: 'confirmation', text: 'Agent work queued for the relay.' });
+    } catch (err) {
+      setMessage({ appearance: 'error', text: err.message || 'Unable to queue agent work.' });
+    } finally {
+      setAgentBusyAction(null);
+    }
+  }
+
+  function inviteAgent() {
+    return runAgentAction('inviteAgentToChannel', {
+      agentName: agentForm.agentName,
+      channel: agentForm.channel
+    });
+  }
+
+  function askAgent() {
+    return runAgentAction('askAgentInChannel', {
+      issueKey: agentForm.issueKey,
+      channel: agentForm.channel,
+      question: agentForm.question
+    });
+  }
+
+  function summarizeChannel() {
+    return runAgentAction('summarizeChannel', {
+      channel: agentForm.channel,
+      format: agentForm.summaryFormat
+    });
+  }
+
+  function activeChannelForAgent() {
+    return activeConsoleWindow === 'Status' ? (String(form.defaultChannels).split(',')[0]?.trim() || '#a9superchat') : activeConsoleWindow;
+  }
+
+  function inviteAgentToActiveChannel() {
+    return runAgentAction('inviteAgentToChannel', {
+      agentName: agentForm.agentName,
+      channel: activeChannelForAgent()
+    });
+  }
+
+  function askAgentInActiveChannel() {
+    return runAgentAction('askAgentInChannel', {
+      issueKey: agentForm.issueKey,
+      channel: activeChannelForAgent(),
+      question: agentForm.question
+    });
+  }
+
+  function summarizeActiveChannel() {
+    return runAgentAction('summarizeChannel', {
+      channel: activeChannelForAgent(),
+      format: agentForm.summaryFormat
+    });
+  }
+
+  function addTesterLog(line, reset = false) {
+    setTesterLog((current) => {
+      const base = reset || current === '... irc lines will go here ...' ? '' : `${current}\n`;
+      return `${base}${line}`.split('\n').slice(-160).join('\n');
+    });
+  }
+
+  function testerProtocols() {
+    if (tester.wsType === 'text') return ['text.ircv3.net', 'binary.ircv3.net'];
+    if (tester.wsType === 'binary') return ['binary.ircv3.net', 'text.ircv3.net'];
+    return [];
+  }
+
+  function sendTesterLine(line) {
+    const socket = testerSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      addTesterLog('[ircws-tester] Not connected.');
+      return;
+    }
+    socket.send(line);
+    addTesterLog(` -> ${line}`);
+  }
+
+  function respondToTesterPing(rawLine) {
+    const socket = testerSocketRef.current;
+    if (!tester.respondToPings || !socket || socket.readyState !== WebSocket.OPEN) return;
+    let line = rawLine;
+    if (line.startsWith('@')) line = line.substring(line.indexOf(' ') + 1).trimStart();
+    if (line.startsWith(':')) line = line.substring(line.indexOf(' ') + 1).trimStart();
+    const spaceIndex = line.indexOf(' ');
+    const command = (spaceIndex === -1 ? line : line.substring(0, spaceIndex)).trim().toUpperCase();
+    const rest = spaceIndex === -1 ? '' : line.substring(spaceIndex + 1).trimStart();
+    if (command === 'PING') sendTesterLine(`PONG ${rest}`);
+  }
+
+  function connectTester() {
+    if (testerSocketRef.current) {
+      addTesterLog('[ircws-tester] Already connected. Disconnect before reconnecting.');
+      return;
+    }
+    addTesterLog('[ircws-tester] Connecting...', true);
+    try {
+      const protocols = testerProtocols();
+      testerSocketRef.current = protocols.length ? new WebSocket(tester.url, protocols) : new WebSocket(tester.url);
+    } catch (err) {
+      testerSocketRef.current = null;
+      setTesterConnected(false);
+      addTesterLog(`[ircws-tester] ${err.message}`);
+      return;
+    }
+
+    testerSocketRef.current.addEventListener('open', () => {
+      const socket = testerSocketRef.current;
+      setTesterConnected(true);
+      addTesterLog(`[ircws-tester] Connected using WS protocol [${socket?.protocol || ''}]`);
+      if (!tester.nick) {
+        addTesterLog('[ircws-tester] Start typing IRC protocol lines.');
+        return;
+      }
+      sendTesterLine('USER 0 0 0 0');
+      sendTesterLine(`NICK ${tester.nick}`);
+    });
+
+    testerSocketRef.current.addEventListener('message', async (event) => {
+      let line = event.data;
+      if (line instanceof Blob) line = await line.text();
+      String(line).split(/\r?\n/).filter(Boolean).forEach((part) => {
+        addTesterLog(`<-  ${part}`);
+        respondToTesterPing(part);
+      });
+    });
+
+    testerSocketRef.current.addEventListener('close', (event) => {
+      addTesterLog(event.reason
+        ? `[ircws-tester] Connection closed (${event.reason})`
+        : '[ircws-tester] Connection closed');
+      testerSocketRef.current = null;
+      setTesterConnected(false);
+    });
+
+    testerSocketRef.current.addEventListener('error', () => {
+      addTesterLog("[ircws-tester] WebSocket error. Check Forge client egress, protocol mode, and the server's allowed origins.");
+    });
+  }
+
+  function disconnectTester() {
+    if (testerSocketRef.current) testerSocketRef.current.close();
+  }
+
+  function sendTesterInput() {
+    if (!tester.rawLine) return;
+    sendTesterLine(tester.rawLine);
+    updateTesterField('rawLine', '');
+  }
+
+  function useTesterUrl() {
+    let parsed;
+    try {
+      parsed = new URL(tester.url);
+    } catch (err) {
+      setMessage({ appearance: 'error', text: 'Enter a valid ws:// or wss:// URL before using it.' });
+      return;
+    }
+    updateField('defaultServer', parsed.hostname);
+    updateField('defaultPort', parsed.port || (parsed.protocol === 'wss:' ? 443 : 80));
+    updateField('defaultUseTls', parsed.protocol === 'wss:');
+    if (tester.nick) setMessage({ appearance: 'info', text: `URL applied. Use ${tester.nick} as your IRC nick in the console.` });
+    else setMessage({ appearance: 'confirmation', text: 'WebSocket URL applied to setup defaults.' });
+  }
+
+  function handleConsoleLine(rawLine) {
+    const parsed = parseIrcLine(rawLine);
+    if (parsed.command === 'PING') {
+      consoleSendRaw(`PONG ${parsed.params.join(' ')}`);
+      return;
+    }
+
+    if (parsed.command === 'CAP') {
+      addConsoleMessage('Status', 'server', 'CAP', parsed.params.join(' '));
+      if (parsed.params[1] === 'LS') consoleSendRaw('CAP END');
+      return;
+    }
+
+    if (parsed.command === '001') {
+      setConsoleRegistered(true);
+      addConsoleMessage('Status', 'system', 'server', parsed.params.slice(1).join(' ') || 'Registered with IRC server.');
+      const channels = String(form.defaultChannels)
+        .split(',')
+        .map((channel) => channel.trim())
+        .filter(Boolean);
+      if (channels.length) consoleSendRaw(`JOIN ${channels.join(',')}`);
+      return;
+    }
+
+    if (parsed.command === 'JOIN') {
+      const channel = parsed.params[0] || activeConsoleWindow;
+      addConsoleWindow(channel);
+      addConsoleNick(channel, parsed.nick);
+      if (parsed.nick === consoleNick) setActiveConsoleWindow(channel);
+      addConsoleMessage(channel, 'system', 'join', `${parsed.nick || 'Someone'} joined ${channel}`);
+      return;
+    }
+
+    if (parsed.command === 'PART') {
+      const channel = parsed.params[0] || activeConsoleWindow;
+      removeConsoleNick(channel, parsed.nick);
+      addConsoleMessage(channel, 'system', 'part', `${parsed.nick || 'Someone'} left ${channel}`);
+      return;
+    }
+
+    if (parsed.command === 'QUIT') {
+      removeConsoleNickEverywhere(parsed.nick);
+      addConsoleMessage(activeConsoleWindow, 'system', 'quit', `${parsed.nick || 'Someone'} quit`);
+      return;
+    }
+
+    if (parsed.command === '353') {
+      const channel = parsed.params[2];
+      const names = (parsed.params[3] || '').split(' ').filter(Boolean);
+      setConsoleNickList(channel, names);
+      addConsoleWindow(channel);
+      return;
+    }
+
+    if (parsed.command === '366') {
+      const channel = parsed.params[1];
+      addConsoleMessage(channel, 'system', 'names', 'End of names list.');
+      return;
+    }
+
+    if (parsed.command === 'PRIVMSG') {
+      const target = parsed.params[0] === consoleNick ? parsed.nick : parsed.params[0];
+      const text = parsed.params.slice(1).join(' ');
+      addConsoleMessage(target || activeConsoleWindow, 'message', parsed.nick, text);
+      return;
+    }
+
+    if (parsed.command === 'NOTICE') {
+      const text = parsed.params.slice(1).join(' ');
+      addConsoleMessage(activeConsoleWindow, 'notice', parsed.nick || 'notice', text);
+      return;
+    }
+
+    if (/^\d{3}$/.test(parsed.command)) {
+      addConsoleMessage('Status', 'server', parsed.command, parsed.params.slice(1).join(' '));
+      return;
+    }
+
+    addConsoleMessage('Status', 'server', parsed.command || 'server', parsed.raw);
+  }
+
+  function connectConsole() {
+    if (consoleSocketRef.current) {
+      addConsoleMessage('Status', 'system', 'client', 'Already connected.');
+      return;
+    }
+    const nick = (consoleNickInput || bootstrap?.user?.suggestedNick || 'superchat')
+      .replace(/[^a-zA-Z0-9_\-[\]]/g, '')
+      .slice(0, 20);
+    const url = connectionUrl;
+    setConsoleNick(nick);
+    setConsoleMessages([]);
+    setConsoleWindows(['Status']);
+    setConsoleNicks({});
+    setActiveConsoleWindow('Status');
+    setConsoleRegistered(false);
+    addConsoleMessage('Status', 'system', 'client', `Connecting to ${url} ...`);
+
+    try {
+      consoleSocketRef.current = new WebSocket(url, ['text.ircv3.net', 'binary.ircv3.net']);
+    } catch (err) {
+      consoleSocketRef.current = null;
+      addConsoleMessage('Status', 'error', 'client', err.message);
+      return;
+    }
+
+    consoleSocketRef.current.addEventListener('open', () => {
+      setConsoleConnected(true);
+      addConsoleMessage('Status', 'system', 'client', 'WebSocket connected.');
+      consoleSendRaw('CAP LS 302');
+      consoleSendRaw(`NICK ${nick}`);
+      consoleSendRaw('USER superchat 0 * :A9 Superchat');
+    });
+
+    consoleSocketRef.current.addEventListener('message', async (event) => {
+      let line = event.data;
+      if (line instanceof Blob) line = await line.text();
+      String(line).split(/\r?\n/).filter(Boolean).forEach(handleConsoleLine);
+    });
+
+    consoleSocketRef.current.addEventListener('close', () => {
+      addConsoleMessage('Status', 'system', 'client', 'Connection closed.');
+      consoleSocketRef.current = null;
+      setConsoleConnected(false);
+      setConsoleRegistered(false);
+    });
+
+    consoleSocketRef.current.addEventListener('error', () => {
+      addConsoleMessage('Status', 'error', 'client', 'WebSocket error.');
+    });
+  }
+
+  function disconnectConsole() {
+    if (consoleSocketRef.current) consoleSocketRef.current.close();
+  }
+
+  function sendConsoleInput() {
+    const text = consoleInput.trim();
+    if (!text) return;
+    setConsoleInput('');
+
+    if (text.startsWith('/')) {
+      const [commandRaw, ...args] = text.slice(1).split(' ');
+      const command = commandRaw.toLowerCase();
+      if (command === 'join' && args[0]) {
+        consoleSendRaw(`JOIN ${args[0]}`);
+        addConsoleWindow(args[0]);
+        setActiveConsoleWindow(args[0]);
+        return;
+      }
+      if (command === 'part') {
+        const channel = args[0] || activeConsoleWindow;
+        consoleSendRaw(`PART ${channel}`);
+        return;
+      }
+      if (command === 'msg' && args.length >= 2) {
+        const [target, ...messageParts] = args;
+        const body = messageParts.join(' ');
+        consoleSendRaw(`PRIVMSG ${target} :${body}`, target);
+        addConsoleMessage(target, 'message', consoleNick, body);
+        setActiveConsoleWindow(target);
+        return;
+      }
+      if (command === 'raw' || command === 'quote') {
+        consoleSendRaw(args.join(' '));
+        return;
+      }
+      consoleSendRaw(text.slice(1));
+      return;
+    }
+
+    if (activeConsoleWindow === 'Status') {
+      addConsoleMessage('Status', 'error', 'client', 'Join or select a channel before sending a message.');
+      return;
+    }
+    consoleSendRaw(`PRIVMSG ${activeConsoleWindow} :${text}`, activeConsoleWindow);
+    addConsoleMessage(activeConsoleWindow, 'message', consoleNick, text);
+  }
+
+  const visibleConsoleMessages = consoleMessages.filter((entry) => entry.target === activeConsoleWindow);
+  const consoleTranscript = visibleConsoleMessages.length
+    ? visibleConsoleMessages.map((entry) => `[${entry.at}] ${entry.actor ? `${entry.actor}: ` : ''}${entry.text}`).join('\n')
+    : 'No messages in this window yet.';
+
+  if (isLoading) {
+    return (
+      <Box padding="space.300">
+        <Inline space="space.100" alignBlock="center">
+          <Spinner size="medium" />
+          <Text>Loading A9 Superchat...</Text>
+        </Inline>
+      </Box>
+    );
+  }
+
+  return (
+    <Box padding="space.300">
+      <Stack space="space.300">
+        <Stack space="space.050">
+          <Heading as="h1" size="large">A9 Superchat</Heading>
+          <Text>IRC for Jira, Confluence, and Rovo-assisted incident work.</Text>
+        </Stack>
+
+        {message ? (
+          <SectionMessage appearance={message.appearance}>
+            <Text>{message.text}</Text>
+          </SectionMessage>
+        ) : null}
+
+        <Inline space="space.100" shouldWrap>
+          <Button appearance={activeView === 'console' ? 'primary' : 'subtle'} onClick={() => setActiveView('console')}>
+            Console
+          </Button>
+          <Button appearance={activeView === 'setup' ? 'primary' : 'subtle'} onClick={() => setActiveView('setup')}>
+            Setup
+          </Button>
+          <Button appearance={activeView === 'agents' ? 'primary' : 'subtle'} onClick={() => setActiveView('agents')}>
+            Agents
+          </Button>
+          <Button appearance={activeView === 'audit' ? 'primary' : 'subtle'} onClick={() => setActiveView('audit')}>
+            Audit
+          </Button>
+        </Inline>
+
+        {activeView === 'console' ? (
+          <Stack space="space.250">
+            <Inline spread="space-between" alignBlock="center" shouldWrap>
+              <Inline space="space.100" alignBlock="center" shouldWrap>
+                <Lozenge appearance={consoleConnected ? 'success' : 'default'}>
+                  {consoleConnected ? 'connected' : 'disconnected'}
+                </Lozenge>
+                <Lozenge appearance={consoleRegistered ? 'inprogress' : 'default'}>
+                  {consoleRegistered ? 'registered' : 'not registered'}
+                </Lozenge>
+                <Text>{connectionUrl}</Text>
+              </Inline>
+              <Inline space="space.100" shouldWrap>
+                <Label labelFor="console-nick">Nick</Label>
+                <Textfield
+                  name="console-nick"
+                  id="console-nick"
+                  value={consoleNickInput}
+                  onChange={(event) => setConsoleNickInput(event.target.value)}
+                  isDisabled={consoleConnected}
+                />
+                <Button appearance="primary" onClick={connectConsole} isDisabled={consoleConnected}>
+                  Connect
+                </Button>
+                <Button onClick={disconnectConsole} isDisabled={!consoleConnected}>
+                  Disconnect
+                </Button>
+                <Button onClick={() => setActiveView('setup')}>Setup</Button>
+              </Inline>
+            </Inline>
+
+            <Inline space="space.200" alignBlock="start">
+              <Stack space="space.100">
+                <Heading as="h2" size="small">Channels</Heading>
+                {consoleWindows.map((windowName) => (
+                  <Button
+                    key={windowName}
+                    appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
+                    onClick={() => setActiveConsoleWindow(windowName)}
+                  >
+                    {windowName}
+                  </Button>
+                ))}
+                <Heading as="h2" size="small">Nicks</Heading>
+                {(consoleNicks[activeConsoleWindow] || []).length ? (consoleNicks[activeConsoleWindow] || []).map((nick) => (
+                  <Text key={nick}>{nick}</Text>
+                )) : <Text>No nicks yet.</Text>}
+              </Stack>
+
+              <Stack space="space.150" grow="fill">
+                <Inline spread="space-between" alignBlock="center" shouldWrap>
+                  <Heading as="h2" size="medium">{activeConsoleWindow}</Heading>
+                  <Inline space="space.100" shouldWrap>
+                    <Button
+                      onClick={inviteAgentToActiveChannel}
+                      isDisabled={agentBusyAction !== null || !form.allowRovoInvites}
+                    >
+                      Invite agent
+                    </Button>
+                    <Button onClick={askAgentInActiveChannel} isDisabled={agentBusyAction !== null}>
+                      Ask agent
+                    </Button>
+                    <Button onClick={summarizeActiveChannel} isDisabled={agentBusyAction !== null}>
+                      Distill
+                    </Button>
+                  </Inline>
+                </Inline>
+                <CodeBlock language="text" text={consoleTranscript} />
+
+                <Inline space="space.100" alignBlock="center">
+                  <Textfield
+                    name="console-input"
+                    id="console-input"
+                    value={consoleInput}
+                    placeholder={activeConsoleWindow === 'Status' ? '/join #channel or /raw VERSION' : `Message ${activeConsoleWindow}`}
+                    onChange={(event) => setConsoleInput(event.target.value)}
+                  />
+                  <Button
+                    appearance="primary"
+                    iconBefore="send"
+                    onClick={sendConsoleInput}
+                    isDisabled={!consoleConnected}
+                  >
+                    Send
+                  </Button>
+                </Inline>
+              </Stack>
+            </Inline>
+
+            <Inline space="space.100" shouldWrap>
+              <Button onClick={() => {
+                setConsoleInput(`/join ${String(form.defaultChannels).split(',')[0]?.trim() || '#a9superchat'}`);
+              }}>
+                Join default
+              </Button>
+              <Button onClick={() => setConsoleInput('/raw ')}>
+                Raw
+              </Button>
+              <Text>Commands: /join, /part, /msg, /raw, /quote.</Text>
+            </Inline>
+          </Stack>
+        ) : null}
+
+        {activeView === 'setup' ? (
+          <Stack space="space.250">
+            <Inline space="space.200" alignBlock="center">
+              <Lozenge appearance="information">{bootstrap?.user?.source || 'identity'}</Lozenge>
+              <Text>{bootstrap?.user?.displayName || 'A9 Superchat User'}</Text>
+              <Text>Suggested IRC nick: {bootstrap?.user?.suggestedNick || 'superchat'}</Text>
+            </Inline>
+
+            <SectionMessage appearance="warning">
+              <Text>
+                Direct browser WebSocket hosts must be declared in Forge client egress. Use the relay for arbitrary IRC networks.
+              </Text>
+            </SectionMessage>
+
+            <Stack space="space.150">
+              <Text>Default WSS URL: {connectionUrl}</Text>
+              <Label labelFor="default-server">IRC server</Label>
+              <Textfield
+                name="default-server"
+                id="default-server"
+                value={form.defaultServer}
+                onChange={(event) => updateField('defaultServer', event.target.value)}
+              />
+              <Label labelFor="default-port">WebSocket port</Label>
+              <Textfield
+                name="default-port"
+                id="default-port"
+                value={String(form.defaultPort)}
+                onChange={(event) => updateField('defaultPort', event.target.value)}
+              />
+              <Label labelFor="default-channels">Default channels</Label>
+              <Textfield
+                name="default-channels"
+                id="default-channels"
+                value={form.defaultChannels}
+                onChange={(event) => updateField('defaultChannels', event.target.value)}
+              />
+              <Label labelFor="relay-url">Relay URL</Label>
+              <Textfield
+                name="relay-url"
+                id="relay-url"
+                value={form.relayUrl}
+                placeholder="wss://relay.example.com"
+                onChange={(event) => updateField('relayUrl', event.target.value)}
+              />
+              <Label labelFor="retention-days">Transcript retention days</Label>
+              <Textfield
+                name="retention-days"
+                id="retention-days"
+                value={String(form.transcriptRetentionDays)}
+                onChange={(event) => updateField('transcriptRetentionDays', event.target.value)}
+              />
+              <Checkbox
+                name="default-use-tls"
+                value="default-use-tls"
+                label="Use TLS / WSS"
+                isChecked={form.defaultUseTls}
+                onChange={(event) => updateField('defaultUseTls', event.target.checked)}
+              />
+              <Checkbox
+                name="allow-rovo-invites"
+                value="allow-rovo-invites"
+                label="Allow Rovo agent channel invites"
+                isChecked={form.allowRovoInvites}
+                onChange={(event) => updateField('allowRovoInvites', event.target.checked)}
+              />
+              <Checkbox
+                name="allow-dcc-proxy"
+                value="allow-dcc-proxy"
+                label="Allow DCC-style relay file sharing"
+                isChecked={form.allowDccProxy}
+                onChange={(event) => updateField('allowDccProxy', event.target.checked)}
+              />
+              <Inline space="space.100">
+                <Button appearance="primary" onClick={saveSettings} isDisabled={isSaving}>
+                  {isSaving ? 'Saving...' : 'Save settings'}
+                </Button>
+                <Button onClick={() => setActiveView('console')}>Open console</Button>
+              </Inline>
+            </Stack>
+
+            <Stack space="space.150">
+              <Heading as="h2" size="medium">WebSocket tester</Heading>
+              <Text>Validate an IRC WebSocket endpoint before opening the live console.</Text>
+              <Inline space="space.100" shouldWrap>
+                <Button onClick={() => {
+                  updateTesterField('url', 'wss://testnet.ergo.chat/webirc');
+                  updateTesterField('wsType', 'text');
+                }}>
+                  Ergo
+                </Button>
+                <Button onClick={() => {
+                  updateTesterField('url', 'wss://testnet.inspircd.org:8097');
+                  updateTesterField('wsType', 'binary');
+                }}>
+                  InspIRCd
+                </Button>
+                <Button onClick={() => {
+                  updateTesterField('url', 'wss://irc.unrealircd.org:8000');
+                  updateTesterField('wsType', 'text');
+                }}>
+                  UnrealIRCd
+                </Button>
+              </Inline>
+
+              <Label labelFor="tester-url">WebSocket URL</Label>
+              <Textfield
+                name="tester-url"
+                id="tester-url"
+                value={tester.url}
+                onChange={(event) => updateTesterField('url', event.target.value)}
+              />
+              <Label labelFor="tester-nick">Nickname</Label>
+              <Textfield
+                name="tester-nick"
+                id="tester-nick"
+                value={tester.nick}
+                onChange={(event) => updateTesterField('nick', event.target.value)}
+              />
+
+              <Inline space="space.100" shouldWrap>
+                <Button appearance={tester.wsType === 'text' ? 'primary' : 'subtle'} onClick={() => updateTesterField('wsType', 'text')}>
+                  Text WS
+                </Button>
+                <Button appearance={tester.wsType === 'binary' ? 'primary' : 'subtle'} onClick={() => updateTesterField('wsType', 'binary')}>
+                  Binary WS
+                </Button>
+                <Button appearance={tester.wsType === 'none' ? 'primary' : 'subtle'} onClick={() => updateTesterField('wsType', 'none')}>
+                  EmptyProtocol WS
+                </Button>
+              </Inline>
+
+              <Inline space="space.100" shouldWrap>
+                <Button appearance="primary" onClick={connectTester} isDisabled={testerConnected}>
+                  Connect
+                </Button>
+                <Button onClick={disconnectTester} isDisabled={!testerConnected}>
+                  Disconnect
+                </Button>
+                <Button onClick={useTesterUrl}>Use URL</Button>
+              </Inline>
+
+              <Checkbox
+                name="tester-follow"
+                value="tester-follow"
+                label="Follow new lines"
+                isChecked={tester.follow}
+                onChange={(event) => updateTesterField('follow', event.target.checked)}
+              />
+              <Checkbox
+                name="tester-pongs"
+                value="tester-pongs"
+                label="Respond to PINGs"
+                isChecked={tester.respondToPings}
+                onChange={(event) => updateTesterField('respondToPings', event.target.checked)}
+              />
+
+              <Label labelFor="tester-line">Send raw IRC line</Label>
+              <Textfield
+                name="tester-line"
+                id="tester-line"
+                value={tester.rawLine}
+                onChange={(event) => updateTesterField('rawLine', event.target.value)}
+              />
+              <Button onClick={sendTesterInput} isDisabled={!testerConnected}>Send line</Button>
+
+              <Heading as="h3" size="small">Example WebSocket code</Heading>
+              <CodeBlock language="javascript" text={testerCode} />
+              <Heading as="h3" size="small">Log</Heading>
+              <CodeBlock language="text" text={testerLog} />
+            </Stack>
+          </Stack>
+        ) : null}
+
+        {activeView === 'agents' ? (
+          <Stack space="space.250">
+            <Heading as="h2" size="medium">Rovo and IRC agents</Heading>
+            <Text>
+              Invite a Rovo agent into an IRC channel, ask a triage question, or queue a channel summary from retained
+              transcript events.
+            </Text>
+            {!form.allowRovoInvites ? (
+              <SectionMessage appearance="warning">
+                <Text>Rovo channel invites are disabled in Setup. Enable them before inviting agents.</Text>
+              </SectionMessage>
+            ) : null}
+
+            <Stack space="space.150">
+              <Label labelFor="agent-name">Agent</Label>
+              <Textfield
+                name="agent-name"
+                id="agent-name"
+                value={agentForm.agentName}
+                onChange={(event) => updateAgentField('agentName', event.target.value)}
+              />
+              <Label labelFor="agent-channel">IRC channel</Label>
+              <Textfield
+                name="agent-channel"
+                id="agent-channel"
+                value={agentForm.channel}
+                onChange={(event) => updateAgentField('channel', event.target.value)}
+              />
+              <Inline space="space.100" shouldWrap>
+                <Button
+                  appearance="primary"
+                  onClick={inviteAgent}
+                  isDisabled={agentBusyAction !== null || !form.allowRovoInvites}
+                >
+                  {agentBusyAction === 'inviteAgentToChannel' ? 'Inviting...' : 'Invite agent'}
+                </Button>
+                <Button onClick={() => setActiveView('console')}>Open console</Button>
+              </Inline>
+            </Stack>
+
+            <Stack space="space.150">
+              <Heading as="h3" size="small">Ask for triage</Heading>
+              <Label labelFor="agent-issue-key">Jira issue key</Label>
+              <Textfield
+                name="agent-issue-key"
+                id="agent-issue-key"
+                placeholder="CS-123"
+                value={agentForm.issueKey}
+                onChange={(event) => updateAgentField('issueKey', event.target.value)}
+              />
+              <Label labelFor="agent-question">Question</Label>
+              <Textfield
+                name="agent-question"
+                id="agent-question"
+                value={agentForm.question}
+                onChange={(event) => updateAgentField('question', event.target.value)}
+              />
+              <Button appearance="primary" onClick={askAgent} isDisabled={agentBusyAction !== null}>
+                {agentBusyAction === 'askAgentInChannel' ? 'Asking...' : 'Ask channel'}
+              </Button>
+            </Stack>
+
+            <Stack space="space.150">
+              <Heading as="h3" size="small">Distill channel</Heading>
+              <Label labelFor="summary-format">Summary format</Label>
+              <Textfield
+                name="summary-format"
+                id="summary-format"
+                value={agentForm.summaryFormat}
+                onChange={(event) => updateAgentField('summaryFormat', event.target.value)}
+              />
+              <Button appearance="primary" onClick={summarizeChannel} isDisabled={agentBusyAction !== null}>
+                {agentBusyAction === 'summarizeChannel' ? 'Queueing...' : 'Queue summary'}
+              </Button>
+            </Stack>
+
+            {agentResult ? (
+              <SectionMessage appearance="info" title="Last queued action">
+                <CodeBlock language="json" text={JSON.stringify(agentResult, null, 2)} />
+              </SectionMessage>
+            ) : null}
+          </Stack>
+        ) : null}
+
+        {activeView === 'audit' ? (
+          <Stack space="space.200">
+            <Heading as="h2" size="medium">Audit and retention</Heading>
+            <Text>Channel event envelopes are stored in Forge storage for bounded audit and later RCA jobs.</Text>
+            <Text>Retention: {form.transcriptRetentionDays} days</Text>
+            <Text>DCC-style file sharing: {form.allowDccProxy ? 'allowed by settings' : 'disabled by settings'}</Text>
+          </Stack>
+        ) : null}
+      </Stack>
+    </Box>
+  );
+}
+
+ForgeReconciler.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
