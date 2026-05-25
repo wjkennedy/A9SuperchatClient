@@ -27,10 +27,13 @@ jest.mock('@forge/api', () => ({
 }));
 
 const app = require('../src/index');
+const ircBotLib = require('../src/irc-bot-lib');
 
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.SUPERCHAT_BOT_TOKEN;
+  delete process.env.SUPERCHAT_ALLOWED_CHANNELS;
+  delete process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE;
 });
 
 test('sanitizes valid settings for Forge storage', () => {
@@ -39,11 +42,13 @@ test('sanitizes valid settings for Forge storage', () => {
     defaultServer: 'irc.example.com',
     defaultPort: 7001,
     defaultChannels: ['#p1', '#engineering'],
+    autoConnect: true,
     transcriptRetentionDays: 120,
     allowRovoInvites: true
   });
 
   expect(settings.defaultPort).toBe(7001);
+  expect(settings.autoConnect).toBe(true);
   expect(settings.transcriptRetentionDays).toBe(90);
   expect(settings.defaultChannels).toEqual(['#p1', '#engineering']);
 });
@@ -53,6 +58,16 @@ test('rejects unsafe relay urls', () => {
     relayUrl: 'http://relay.example.com',
     defaultChannels: ['#p1']
   })).toThrow('relayUrl must be a wss:// URL');
+});
+
+test('normalizes public A9 tunnel port to WSS default', () => {
+  const settings = app._private.sanitizeSettings({
+    defaultServer: 'irc.a9group.net',
+    defaultPort: 8097,
+    defaultChannels: ['#a9superchat']
+  });
+
+  expect(settings.defaultPort).toBe(443);
 });
 
 test('queues Rovo triage message with Jira issue context', async () => {
@@ -148,6 +163,58 @@ test('queues channel summary from resolver', async () => {
   expect(result.format).toBe('best-practice');
   expect(mockStorage.set).toHaveBeenCalledTimes(1);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('channel-summary');
+});
+
+test('prepares browser RAG context for IRC bot handoff', async () => {
+  const result = await app.handler.prepareBotContext({
+    context: { accountId: 'abc-123' },
+    payload: {
+      channel: '#a9superchat',
+      source: 'forge-browser',
+      pageTitle: 'Incident CS-123',
+      pageUrl: 'https://example.atlassian.net/browse/CS-123',
+      transcript: ['Ada: token=super-secret-token', 'Grace: timeline is incomplete']
+    }
+  });
+
+  expect(result.channel).toBe('#a9superchat');
+  expect(result.ircLine).toBe(`A9SysOp: context ${result.contextId}`);
+  expect(result.contextId).toMatch(/^[a-f0-9]{16}$/);
+  expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set.mock.calls[0][0]).toBe(app._private.botContextKey(result.contextId));
+  expect(mockStorage.set.mock.calls[0][1].transcript[0]).toContain('token=<redacted>');
+  expect(mockStorage.set.mock.calls[1][1].type).toBe('bot-context-prepared');
+});
+
+test('irc context command activates browser context for a channel', async () => {
+  mockStorage.get.mockResolvedValueOnce({
+    channel: '#a9superchat',
+    accountId: 'abc-123',
+    source: 'forge-browser',
+    pageTitle: 'Incident CS-123',
+    pageUrl: 'https://example.atlassian.net/browse/CS-123',
+    selectedText: '',
+    note: 'Active IRC channel #a9superchat',
+    transcript: ['Ada: timeline is incomplete'],
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60000).toISOString()
+  });
+
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'context',
+      args: ['0123456789abcdef']
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(202);
+  expect(body.actions[0].text).toContain('Loaded browser context 0123456789abcdef');
+  expect(mockStorage.set).toHaveBeenCalledTimes(3);
+  expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.activeChannelContextKey('#a9superchat'));
+  expect(mockStorage.set.mock.calls[2][1].type).toBe('bot-context-activated');
 });
 
 test('irc command webtrigger returns bot help action', async () => {
@@ -296,4 +363,85 @@ test('irc command webtrigger accepts valid bot token when configured', async () 
 
   expect(response.statusCode).toBe(200);
   expect(mockStorage.set).toHaveBeenCalledTimes(1);
+});
+
+test('irc command webtrigger enforces configured channel allowlist', async () => {
+  process.env.SUPERCHAT_ALLOWED_CHANNELS = '#a9superchat,#atlassian';
+
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      channel: '#random',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(400);
+  expect(body.error).toContain('not allowed');
+  expect(mockStorage.set).not.toHaveBeenCalled();
+});
+
+test('irc command webtrigger enforces configured storage-backed rate limit', async () => {
+  process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE = '1';
+  mockStorage.get.mockResolvedValueOnce(1);
+
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(400);
+  expect(body.error).toContain('rate limit');
+  expect(mockStorage.set).not.toHaveBeenCalled();
+});
+
+test('irc command webtrigger redacts secrets before returning channel actions', async () => {
+  mockRequestJira.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      fields: {
+        summary: 'Portal outage',
+        status: { name: 'Investigating' },
+        priority: { name: 'Highest' },
+        issuetype: { name: 'Incident' }
+      }
+    })
+  });
+
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      channel: '#p1',
+      actorNick: 'Ada',
+      command: 'ask',
+      args: ['CS-123', 'token=super-secret-token', 'What', 'changed?']
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(202);
+  expect(body.actions[0].text).toContain('token=<redacted>');
+  expect(body.actions[0].text).not.toContain('super-secret-token');
+});
+
+test('irc bot lib parses addressed channel commands and translates Forge actions', () => {
+  const parsed = ircBotLib.parseAddressedCommand({
+    text: 'A9SysOp: ask CS-123 token=super-secret-token',
+    botNick: 'A9SysOp'
+  });
+
+  expect(parsed).toEqual({
+    command: 'ask',
+    args: ['CS-123', 'token=<redacted>']
+  });
+  expect(ircBotLib.ircActionToLines({
+    type: 'irc-message',
+    channel: '#a9superchat',
+    target: 'Ada',
+    text: 'Try: help'
+  })).toEqual(['PRIVMSG #a9superchat :Ada: Try: help']);
 });

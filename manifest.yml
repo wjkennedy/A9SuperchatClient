@@ -134,6 +134,10 @@ permissions:
         - address: "*.superchat-relay.example.com"
           inScopeEUD: true
       client:
+        - address: "wss://irc.a9group.net"
+          inScopeEUD: true
+        - address: "wss://irc.a9group.net:443"
+          inScopeEUD: true
         - address: "wss://testnet.ergo.chat"
           inScopeEUD: true
         - address: "wss://testnet.inspircd.org:8097"

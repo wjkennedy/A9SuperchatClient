@@ -18,10 +18,11 @@ import { invoke } from '@forge/bridge';
 
 const DEFAULT_FORM = {
   relayUrl: '',
-  defaultServer: 'irc.unrealircd.org',
-  defaultPort: 8000,
+  defaultServer: 'irc.a9group.net',
+  defaultPort: 443,
   defaultUseTls: true,
   defaultChannels: '#a9superchat,#atlassian',
+  autoConnect: false,
   transcriptRetentionDays: 14,
   allowRovoInvites: true,
   allowDccProxy: false
@@ -36,7 +37,7 @@ const DEFAULT_AGENT_FORM = {
 };
 
 const DEFAULT_TESTER = {
-  url: 'wss://irc.unrealircd.org:8000',
+  url: 'wss://irc.a9group.net',
   nick: '',
   wsType: 'text',
   rawLine: '',
@@ -93,17 +94,48 @@ function parseIrcLine(rawLine) {
 }
 
 function normalizeSettings(settings) {
-  return {
+  const normalized = {
     ...DEFAULT_FORM,
     ...settings,
     defaultChannels: Array.isArray(settings?.defaultChannels)
       ? settings.defaultChannels.join(',')
       : settings?.defaultChannels || DEFAULT_FORM.defaultChannels
   };
+  if (normalized.defaultServer === 'irc.a9group.net' && Number(normalized.defaultPort) === 8097) {
+    normalized.defaultPort = 443;
+  }
+  return normalized;
+}
+
+function assembleWebSocketUrl({ server, port, useTls }) {
+  const protocol = useTls ? 'wss' : 'ws';
+  const numericPort = Number(port);
+  const defaultPort = useTls ? 443 : 80;
+  const portSuffix = numericPort && numericPort !== defaultPort ? `:${numericPort}` : '';
+  return `${protocol}://${server}${portSuffix}`;
+}
+
+function normalizePublicEndpoint(parsedUrl) {
+  if (parsedUrl.hostname === 'irc.a9group.net' && (parsedUrl.port === '8097' || parsedUrl.port === '')) {
+    return {
+      server: parsedUrl.hostname,
+      port: 443,
+      useTls: true
+    };
+  }
+  return {
+    server: parsedUrl.hostname,
+    port: Number(parsedUrl.port || (parsedUrl.protocol === 'wss:' ? 443 : 80)),
+    useTls: parsedUrl.protocol === 'wss:'
+  };
+}
+
+function hasConnectionConfig(settings) {
+  return Boolean(settings?.defaultServer && Number(settings?.defaultPort));
 }
 
 function App() {
-  const [activeView, setActiveView] = useState('console');
+  const [activeView, setActiveView] = useState('setup');
   const [bootstrap, setBootstrap] = useState(null);
   const [form, setForm] = useState(DEFAULT_FORM);
   const [isLoading, setIsLoading] = useState(true);
@@ -111,6 +143,7 @@ function App() {
   const [agentForm, setAgentForm] = useState(DEFAULT_AGENT_FORM);
   const [agentBusyAction, setAgentBusyAction] = useState(null);
   const [agentResult, setAgentResult] = useState(null);
+  const [contextBusy, setContextBusy] = useState(false);
   const [tester, setTester] = useState(DEFAULT_TESTER);
   const [testerLog, setTesterLog] = useState('... irc lines will go here ...');
   const [testerConnected, setTesterConnected] = useState(false);
@@ -137,8 +170,11 @@ function App() {
   const [restoreRequested, setRestoreRequested] = useState(false);
 
   const connectionUrl = useMemo(() => {
-    const protocol = form.defaultUseTls ? 'wss' : 'ws';
-    return `${protocol}://${form.defaultServer}:${form.defaultPort}`;
+    return assembleWebSocketUrl({
+      server: form.defaultServer,
+      port: form.defaultPort,
+      useTls: form.defaultUseTls
+    });
   }, [form.defaultServer, form.defaultPort, form.defaultUseTls]);
 
   useEffect(() => {
@@ -147,8 +183,9 @@ function App() {
       .then((data) => {
         if (!mounted) return;
         const persisted = loadConsoleState();
+        const normalizedSettings = normalizeSettings(data.settings);
         setBootstrap(data);
-        setForm(normalizeSettings(data.settings));
+        setForm(normalizedSettings);
         setConsoleNickInput(persisted?.nickInput || data.user?.suggestedNick || 'superchat');
         if (persisted?.nick) setConsoleNick(persisted.nick);
         if (Array.isArray(persisted?.messages)) setConsoleMessages(persisted.messages.slice(-500));
@@ -159,7 +196,8 @@ function App() {
         if (persisted?.mentions && typeof persisted.mentions === 'object') setConsoleMentions(persisted.mentions);
         if (persisted?.activeWindow) setActiveConsoleWindow(persisted.activeWindow);
         if (persisted?.input) setConsoleInput(persisted.input);
-        if (persisted?.shouldReconnect) {
+        if (persisted?.shouldReconnect || (normalizedSettings.autoConnect && hasConnectionConfig(normalizedSettings))) {
+          setActiveView('console');
           setConsoleShouldReconnect(true);
           setRestoreRequested(true);
         }
@@ -333,14 +371,24 @@ function App() {
     setConsoleTopics((current) => ({ ...current, [channel]: topic || '' }));
   }
 
-  function consoleSendRaw(line, echoTarget = 'Status') {
+  function consoleSendRaw(line, echoTarget = 'Status', options = {}) {
     const socket = consoleSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       addConsoleMessage('Status', 'error', 'client', 'Not connected.');
       return false;
     }
     socket.send(`${line}\r\n`);
-    addConsoleMessage(echoTarget, 'outbound', consoleNick || 'me', `-> ${line}`);
+    if (!options.silent) {
+      addConsoleMessage(echoTarget, 'outbound', consoleNick || 'me', `-> ${line}`);
+    }
+    return true;
+  }
+
+  function consoleSendPrivmsg(target, body) {
+    if (!consoleSendRaw(`PRIVMSG ${target} :${body}`, target, { silent: true })) {
+      return false;
+    }
+    addConsoleMessage(target, 'message', consoleNick || consoleNickInput || 'me', body);
     return true;
   }
 
@@ -432,6 +480,44 @@ function App() {
       channel: activeChannelForAgent(),
       format: agentForm.summaryFormat
     });
+  }
+
+  async function summonBotWithContext() {
+    const channel = activeChannelForAgent();
+    if (channel === 'Status') {
+      setMessage({ appearance: 'error', text: 'Select or join a channel before summoning A9SysOp with context.' });
+      return;
+    }
+    if (!consoleConnected) {
+      setMessage({ appearance: 'error', text: 'Connect to IRC before summoning A9SysOp into the channel.' });
+      return;
+    }
+
+    setContextBusy(true);
+    setMessage(null);
+    try {
+      const transcript = consoleMessages
+        .filter((entry) => entry.target === channel)
+        .slice(-25)
+        .map((entry) => `[${entry.at}] ${entry.actor ? `${entry.actor}: ` : ''}${entry.text}`);
+      const result = await invoke('prepareBotContext', {
+        channel,
+        source: 'forge-browser',
+        pageTitle: document.title || 'A9 Superchat',
+        pageUrl: window.location.href,
+        note: `Active IRC channel ${channel}; selected console window ${activeConsoleWindow}.`,
+        transcript
+      });
+
+      if (consoleSendPrivmsg(channel, result.ircLine)) {
+        setAgentResult(result);
+        setMessage({ appearance: 'confirmation', text: `A9SysOp context ${result.contextId} sent into ${channel}.` });
+      }
+    } catch (err) {
+      setMessage({ appearance: 'error', text: err.message || 'Unable to prepare browser context for A9SysOp.' });
+    } finally {
+      setContextBusy(false);
+    }
   }
 
   function addTesterLog(line, reset = false) {
@@ -537,11 +623,12 @@ function App() {
       setMessage({ appearance: 'error', text: 'Enter a valid ws:// or wss:// URL before using it.' });
       return;
     }
-    updateField('defaultServer', parsed.hostname);
-    updateField('defaultPort', parsed.port || (parsed.protocol === 'wss:' ? 443 : 80));
-    updateField('defaultUseTls', parsed.protocol === 'wss:');
-    if (tester.nick) setMessage({ appearance: 'info', text: `URL applied. Use ${tester.nick} as your IRC nick in the console.` });
-    else setMessage({ appearance: 'confirmation', text: 'WebSocket URL applied to setup defaults.' });
+    const endpoint = normalizePublicEndpoint(parsed);
+    updateField('defaultServer', endpoint.server);
+    updateField('defaultPort', endpoint.port);
+    updateField('defaultUseTls', endpoint.useTls);
+    if (tester.nick) setMessage({ appearance: 'info', text: `URL applied to Connect settings. Use ${tester.nick} as your IRC nick, then save settings to keep it.` });
+    else setMessage({ appearance: 'confirmation', text: 'WebSocket URL applied to Connect settings. Save settings to keep it.' });
   }
 
   function handleConsoleLine(rawLine) {
@@ -675,7 +762,7 @@ function App() {
     addConsoleMessage('Status', 'system', 'client', `Connecting to ${url} ...`);
 
     try {
-      consoleSocketRef.current = new WebSocket(url, ['text.ircv3.net', 'binary.ircv3.net']);
+      consoleSocketRef.current = new WebSocket(url, ['irc.a9group.net']);
     } catch (err) {
       consoleSocketRef.current = null;
       setConsoleShouldReconnect(false);
@@ -846,11 +933,11 @@ function App() {
         ) : null}
 
         <Inline space="space.100" shouldWrap>
-          <Button appearance={activeView === 'console' ? 'primary' : 'subtle'} onClick={() => setActiveView('console')}>
-            Console
-          </Button>
           <Button appearance={activeView === 'setup' ? 'primary' : 'subtle'} onClick={() => setActiveView('setup')}>
             Setup
+          </Button>
+          <Button appearance={activeView === 'console' ? 'primary' : 'subtle'} onClick={() => setActiveView('console')}>
+            Connect
           </Button>
           <Button appearance={activeView === 'agents' ? 'primary' : 'subtle'} onClick={() => setActiveView('agents')}>
             Agents
@@ -901,7 +988,7 @@ function App() {
                 {consoleWindows.map((windowName) => (
                   <Button
                     key={windowName}
-                  appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
+                    appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
                     onClick={() => switchConsoleWindow(windowName)}
                   >
                     {windowName}
@@ -933,6 +1020,9 @@ function App() {
                     </Button>
                     <Button onClick={summarizeActiveChannel} isDisabled={agentBusyAction !== null}>
                       Distill
+                    </Button>
+                    <Button onClick={summonBotWithContext} isDisabled={contextBusy || !consoleConnected || activeConsoleWindow === 'Status'}>
+                      {contextBusy ? 'Summoning...' : 'Summon A9SysOp'}
                     </Button>
                   </Inline>
                 </Inline>
@@ -974,89 +1064,22 @@ function App() {
 
         {activeView === 'setup' ? (
           <Stack space="space.250">
-            <Inline space="space.200" alignBlock="center">
-              <Lozenge appearance="information">{bootstrap?.user?.source || 'identity'}</Lozenge>
-              <Text>{bootstrap?.user?.displayName || 'A9 Superchat User'}</Text>
-              <Text>Suggested IRC nick: {bootstrap?.user?.suggestedNick || 'superchat'}</Text>
-            </Inline>
-
-            <SectionMessage appearance="warning">
-              <Text>
-                Direct browser WebSocket hosts must be declared in Forge client egress. Use the relay for arbitrary IRC networks.
-              </Text>
-            </SectionMessage>
-
-            <Stack space="space.150">
-              <Text>Default WSS URL: {connectionUrl}</Text>
-              <Label labelFor="default-server">IRC server</Label>
-              <Textfield
-                name="default-server"
-                id="default-server"
-                value={form.defaultServer}
-                onChange={(event) => updateField('defaultServer', event.target.value)}
-              />
-              <Label labelFor="default-port">WebSocket port</Label>
-              <Textfield
-                name="default-port"
-                id="default-port"
-                value={String(form.defaultPort)}
-                onChange={(event) => updateField('defaultPort', event.target.value)}
-              />
-              <Label labelFor="default-channels">Default channels</Label>
-              <Textfield
-                name="default-channels"
-                id="default-channels"
-                value={form.defaultChannels}
-                onChange={(event) => updateField('defaultChannels', event.target.value)}
-              />
-              <Label labelFor="relay-url">Relay URL</Label>
-              <Textfield
-                name="relay-url"
-                id="relay-url"
-                value={form.relayUrl}
-                placeholder="wss://relay.example.com"
-                onChange={(event) => updateField('relayUrl', event.target.value)}
-              />
-              <Label labelFor="retention-days">Transcript retention days</Label>
-              <Textfield
-                name="retention-days"
-                id="retention-days"
-                value={String(form.transcriptRetentionDays)}
-                onChange={(event) => updateField('transcriptRetentionDays', event.target.value)}
-              />
-              <Checkbox
-                name="default-use-tls"
-                value="default-use-tls"
-                label="Use TLS / WSS"
-                isChecked={form.defaultUseTls}
-                onChange={(event) => updateField('defaultUseTls', event.target.checked)}
-              />
-              <Checkbox
-                name="allow-rovo-invites"
-                value="allow-rovo-invites"
-                label="Allow Rovo agent channel invites"
-                isChecked={form.allowRovoInvites}
-                onChange={(event) => updateField('allowRovoInvites', event.target.checked)}
-              />
-              <Checkbox
-                name="allow-dcc-proxy"
-                value="allow-dcc-proxy"
-                label="Allow DCC-style relay file sharing"
-                isChecked={form.allowDccProxy}
-                onChange={(event) => updateField('allowDccProxy', event.target.checked)}
-              />
-              <Inline space="space.100">
-                <Button appearance="primary" onClick={saveSettings} isDisabled={isSaving}>
-                  {isSaving ? 'Saving...' : 'Save settings'}
-                </Button>
-                <Button onClick={() => setActiveView('console')}>Open console</Button>
-              </Inline>
-            </Stack>
-
             <Stack space="space.150">
               <Heading as="h2" size="medium">WebSocket tester</Heading>
               <Text>Validate an IRC WebSocket endpoint before opening the live console.</Text>
+              <SectionMessage appearance="info" title="Promote a working endpoint">
+                <Text>
+                  Test the server here first. When the connection works, use the highlighted button to copy the URL
+                  into Connect settings, then save if you want it to load next time.
+                </Text>
+              </SectionMessage>
               <Inline space="space.100" shouldWrap>
+                <Button onClick={() => {
+                  updateTesterField('url', 'wss://irc.a9group.net');
+                  updateTesterField('wsType', 'text');
+                }}>
+                  A9 InspIRCd
+                </Button>
                 <Button onClick={() => {
                   updateTesterField('url', 'wss://testnet.ergo.chat/webirc');
                   updateTesterField('wsType', 'text');
@@ -1105,13 +1128,13 @@ function App() {
               </Inline>
 
               <Inline space="space.100" shouldWrap>
-                <Button appearance="primary" onClick={connectTester} isDisabled={testerConnected}>
+                <Button onClick={connectTester} isDisabled={testerConnected}>
                   Connect
                 </Button>
                 <Button onClick={disconnectTester} isDisabled={!testerConnected}>
                   Disconnect
                 </Button>
-                <Button onClick={useTesterUrl}>Use URL</Button>
+                <Button appearance="primary" onClick={useTesterUrl}>Use URL for Connect</Button>
               </Inline>
 
               <Checkbox
@@ -1142,6 +1165,93 @@ function App() {
               <CodeBlock language="javascript" text={testerCode} />
               <Heading as="h3" size="small">Log</Heading>
               <CodeBlock language="text" text={testerLog} />
+            </Stack>
+
+            <Inline space="space.200" alignBlock="center" shouldWrap>
+              <Lozenge appearance="information">{bootstrap?.user?.source || 'identity'}</Lozenge>
+              <Text>{bootstrap?.user?.displayName || 'A9 Superchat User'}</Text>
+              <Text>Suggested IRC nick: {bootstrap?.user?.suggestedNick || 'superchat'}</Text>
+            </Inline>
+
+            <SectionMessage appearance="warning">
+              <Text>
+                Direct browser WebSocket hosts must be declared in Forge client egress. Add each IRC WSS origin to the manifest before deployment.
+              </Text>
+            </SectionMessage>
+
+            <Stack space="space.150">
+              <Heading as="h2" size="medium">Connect settings</Heading>
+              <Text>Default WSS URL: {connectionUrl}</Text>
+              <Label labelFor="default-server">IRC server</Label>
+              <Textfield
+                name="default-server"
+                id="default-server"
+                value={form.defaultServer}
+                onChange={(event) => updateField('defaultServer', event.target.value)}
+              />
+              <Label labelFor="default-port">WebSocket port</Label>
+              <Textfield
+                name="default-port"
+                id="default-port"
+                value={String(form.defaultPort)}
+                onChange={(event) => updateField('defaultPort', event.target.value)}
+              />
+              <Label labelFor="default-channels">Default channels</Label>
+              <Textfield
+                name="default-channels"
+                id="default-channels"
+                value={form.defaultChannels}
+                onChange={(event) => updateField('defaultChannels', event.target.value)}
+              />
+              <Label labelFor="relay-url">Relay URL</Label>
+              <Textfield
+                name="relay-url"
+                id="relay-url"
+                value={form.relayUrl}
+                placeholder="wss://relay.example.com"
+                onChange={(event) => updateField('relayUrl', event.target.value)}
+              />
+              <Label labelFor="retention-days">Transcript retention days</Label>
+              <Textfield
+                name="retention-days"
+                id="retention-days"
+                value={String(form.transcriptRetentionDays)}
+                onChange={(event) => updateField('transcriptRetentionDays', event.target.value)}
+              />
+              <Checkbox
+                name="default-use-tls"
+                value="default-use-tls"
+                label="Use TLS / WSS"
+                isChecked={form.defaultUseTls}
+                onChange={(event) => updateField('defaultUseTls', event.target.checked)}
+              />
+              <Checkbox
+                name="auto-connect"
+                value="auto-connect"
+                label="Open Connect and reconnect automatically when this config is available"
+                isChecked={form.autoConnect}
+                onChange={(event) => updateField('autoConnect', event.target.checked)}
+              />
+              <Checkbox
+                name="allow-rovo-invites"
+                value="allow-rovo-invites"
+                label="Allow Rovo agent channel invites"
+                isChecked={form.allowRovoInvites}
+                onChange={(event) => updateField('allowRovoInvites', event.target.checked)}
+              />
+              <Checkbox
+                name="allow-dcc-proxy"
+                value="allow-dcc-proxy"
+                label="Allow DCC-style relay file sharing"
+                isChecked={form.allowDccProxy}
+                onChange={(event) => updateField('allowDccProxy', event.target.checked)}
+              />
+              <Inline space="space.100" shouldWrap>
+                <Button appearance="primary" onClick={saveSettings} isDisabled={isSaving}>
+                  {isSaving ? 'Saving...' : 'Save settings'}
+                </Button>
+                <Button onClick={() => setActiveView('console')}>Open Connect</Button>
+              </Inline>
             </Stack>
           </Stack>
         ) : null}
@@ -1183,6 +1293,9 @@ function App() {
                   {agentBusyAction === 'inviteAgentToChannel' ? 'Inviting...' : 'Invite agent'}
                 </Button>
                 <Button onClick={() => setActiveView('console')}>Open console</Button>
+                <Button onClick={summonBotWithContext} isDisabled={contextBusy || !consoleConnected}>
+                  {contextBusy ? 'Summoning...' : 'Summon with context'}
+                </Button>
               </Inline>
             </Stack>
 

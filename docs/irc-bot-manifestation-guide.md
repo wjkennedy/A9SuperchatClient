@@ -8,12 +8,12 @@ The Forge app owns Atlassian identity, Jira/Confluence context, Rovo actions, st
 
 Recommended default bot identity:
 
-- Nick: `A9Rovo`
+- Nick: `A9SysOp`
 - Real name: `A9 Superchat Channel Operator`
 - Default channels: `#a9superchat`, `#atlassian`
 - Role: channel host, Rovo bridge, Jira-aware triage helper, channel distillation trigger
 
-The bot should not pretend to be a human user. It should identify itself as the A9 Superchat/Rovo bridge and keep messages concise.
+The bot should not pretend to be a human user. It should identify itself as the A9 Superchat/Rovo bridge and keep messages concise except for the occasional deep left field trivia question about Atlassian.
 
 ## Responsibilities
 
@@ -40,17 +40,25 @@ The bot should not:
 After deployment, retrieve the webtrigger URLs:
 
 ```sh
-forge webtrigger get-url --key superchat-irc-command
-forge webtrigger get-url --key superchat-irc-event
-forge webtrigger get-url --key superchat-incident-ingest
+forge webtrigger create --functionKey superchat-irc-command --site <site>.atlassian.net --product Jira
+forge webtrigger create --functionKey superchat-irc-event --site <site>.atlassian.net --product Jira
+forge webtrigger create --functionKey superchat-incident-ingest --site <site>.atlassian.net --product Jira
 ```
+
+Use `forge webtrigger list --functionKey <key> --site <site>.atlassian.net --product Jira` to retrieve URLs that already exist.
 
 Configure the bot with:
 
 ```text
+IRC_SERVER=irc.libera.chat
+IRC_PORT=6697
+IRC_TLS=true
+IRC_NICK=A9SysOp
+IRC_USERNAME=a9sysop
+IRC_REALNAME=A9 Superchat Channel Operator
+IRC_CHANNELS=#a9superchat,#atlassian
 SUPERCHAT_COMMAND_URL=<superchat-irc-command URL>
 SUPERCHAT_EVENT_URL=<superchat-irc-event URL>
-SUPERCHAT_INCIDENT_INGEST_URL=<superchat-incident-ingest URL>
 SUPERCHAT_BOT_TOKEN=<shared callback token>
 ```
 
@@ -62,12 +70,31 @@ x-superchat-bot-token: <shared callback token>
 
 For production, set `SUPERCHAT_BOT_TOKEN` in Forge environment variables before exposing the bot publicly.
 
+The repository includes the production-shaped persistent bot at `bot/a9sysop.js`. It uses Node's built-in TCP/TLS socket support, joins configured IRC channels, responds to PING, parses addressed channel commands, posts real Forge webtrigger callbacks, and translates returned Forge `irc-message` actions back into IRC.
+
+Run it with:
+
+```sh
+npm run bot
+```
+
+Production Forge callback controls:
+
+```text
+SUPERCHAT_BOT_TOKEN=<shared callback token>
+SUPERCHAT_ALLOWED_CHANNELS=#a9superchat,#atlassian,#p1
+SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE=6
+```
+
+`SUPERCHAT_ALLOWED_CHANNELS` and `SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE` are enforced in Forge webtrigger handlers. Leaving them unset keeps development flexible, but public bot endpoints should set both.
+
 ## IRC Commands
 
 The bot should support these channel-facing commands:
 
 ```text
 help
+context ID
 invite [agent name]
 ask ISSUE-123 question text
 distill [rca|timeline|handoff|best-practice|action-items|executive-summary]
@@ -76,17 +103,18 @@ distill [rca|timeline|handoff|best-practice|action-items|executive-summary]
 Recommended IRC command forms:
 
 ```text
-A9Rovo: help
-A9Rovo: invite Portal Triage Agent
-A9Rovo: ask CS-123 What evidence is missing for accurate triage?
-A9Rovo: distill rca
+A9SysOp: help
+A9SysOp: context 0123456789abcdef
+A9SysOp: invite Portal Triage Agent
+A9SysOp: ask CS-123 What evidence is missing for accurate triage?
+A9SysOp: distill rca
 ```
 
 The bot may also accept slash-style commands if the network/client sends them as channel text:
 
 ```text
-/invite A9Rovo
-/msg A9Rovo ask CS-123 What evidence is missing?
+/invite A9SysOp
+/msg A9SysOp ask CS-123 What evidence is missing?
 ```
 
 ## Command Callback
@@ -108,12 +136,13 @@ Supported fields:
 
 - `channel`: IRC channel beginning with `#` or `&`.
 - `actorNick`: nick that issued the command.
-- `command`: `help`, `invite`, `ask`, `distill`, `summarize`, or `summary`.
+- `command`: `help`, `context`, `ctx`, `summon`, `invite`, `ask`, `distill`, `summarize`, or `summary`.
 - `args`: command arguments as an array of strings.
 - `issueKey`: optional direct issue key for `ask`.
 - `question`: optional direct question text for `ask`.
 - `format`: optional direct summary format for `distill`.
 - `agentName`: optional direct agent name for `invite`.
+- `contextId`: optional direct context ID for `context`.
 
 Example response:
 
@@ -139,6 +168,19 @@ Example response:
 
 The bot should send each `irc-message` action to IRC. If `target` is present, use a private notice or a directed channel reply depending on network policy.
 
+## Browser Context Handoff
+
+The Forge browser UI can summon the persistent bot with RAG-style context without dumping that context into IRC:
+
+1. The user presses `Summon A9SysOp` in the active IRC channel.
+2. The UI calls the `prepareBotContext` resolver with a bounded context bundle: active channel, page metadata, user note, selected text when available, and recent visible channel lines.
+3. Forge stores the context under a short random ID and returns `A9SysOp: context <id>`.
+4. The browser sends that one-line command into IRC using the existing WebSocket IRC connection.
+5. The persistent bot sees the addressed command and calls the normal `superchat-irc-command` webtrigger.
+6. Forge validates the channel, activates the context for that channel, records an audit envelope, and returns an IRC-ready acknowledgement.
+
+The context ID is scoped to the channel and expires after 15 minutes. The IRC channel sees only the ID and acknowledgement; the RAG payload remains in Forge storage.
+
 ## Event Callback
 
 Send channel lifecycle callbacks to `superchat-irc-event`.
@@ -150,7 +192,7 @@ Join event:
   "channel": "#atlassian",
   "type": "join",
   "actorNick": "ada",
-  "botNick": "A9Rovo"
+  "botNick": "A9SysOp"
 }
 ```
 
@@ -224,7 +266,7 @@ For incident channels, the bot should steer toward facts:
 3. Forge fetches permitted issue context and queues a triage message.
 4. The bot posts the queued message into the target IRC channel.
 5. Humans, Rovo agents, and MCP-backed helpers collaborate in the channel.
-6. A user calls `A9Rovo: distill rca`.
+6. A user calls `A9SysOp: distill rca`.
 7. Forge queues channel distillation for RCA, handoff, best-practice, or action items.
 
 ## Security And Policy
@@ -295,10 +337,10 @@ onJoin(async (event) => {
 - Set matching token in bot runtime.
 - Configure IRC server, port, TLS, nick, real name, and channels.
 - Start bot and verify it joins `#a9superchat` and `#atlassian`.
-- Run `A9Rovo: help` in channel.
-- Run `A9Rovo: invite A9 Superchat Channel Operator`.
-- Run `A9Rovo: ask CS-123 What evidence is missing?`.
-- Run `A9Rovo: distill rca`.
+- Run `A9SysOp: help` in channel.
+- Run `A9SysOp: invite A9 Superchat Channel Operator`.
+- Run `A9SysOp: ask CS-123 What evidence is missing?`.
+- Run `A9SysOp: distill rca`.
 - Verify Forge audit envelopes are created.
 
 ## Current Limits

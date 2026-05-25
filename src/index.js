@@ -1,6 +1,7 @@
 const ResolverModule = require('@forge/resolver');
 const api = require('@forge/api');
 const crypto = require('crypto');
+const { normalizeChannels, redactSecrets } = require('./irc-bot-lib');
 const { route, storage } = api;
 
 const Resolver = ResolverModule.default || ResolverModule;
@@ -8,10 +9,11 @@ const resolver = new Resolver();
 
 const DEFAULT_SETTINGS = {
   relayUrl: '',
-  defaultServer: 'irc.supernets.org',
-  defaultPort: 7000,
+  defaultServer: 'irc.a9group.net',
+  defaultPort: 443,
   defaultUseTls: true,
   defaultChannels: ['#a9superchat', '#atlassian'],
+  autoConnect: false,
   transcriptRetentionDays: 14,
   allowRovoInvites: true,
   allowDccProxy: false
@@ -19,6 +21,15 @@ const DEFAULT_SETTINGS = {
 
 function userSettingsKey(accountId) {
   return `user-settings:${accountId || 'anonymous'}`;
+}
+
+function botContextKey(contextId) {
+  return `bot-context:${contextId}`;
+}
+
+function activeChannelContextKey(channel) {
+  const safeChannel = String(channel || 'unknown').replace(/[^a-zA-Z0-9#_-]/g, '_');
+  return `active-bot-context:${safeChannel}`;
 }
 
 function channelAuditKey(channel, now = Date.now()) {
@@ -54,7 +65,9 @@ function sanitizeNick(nick, fallback = 'guest') {
 }
 
 function sanitizeText(text, maxLength = 1000) {
-  return String(text || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, maxLength);
+  return redactSecrets(String(text || ''))
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .slice(0, maxLength);
 }
 
 function getHeader(headers, name) {
@@ -78,6 +91,35 @@ function validateBotToken(event) {
   return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
+function getAllowedBotChannels() {
+  if (!process.env.SUPERCHAT_ALLOWED_CHANNELS) {
+    return null;
+  }
+  return normalizeChannels(process.env.SUPERCHAT_ALLOWED_CHANNELS, []);
+}
+
+function assertBotChannelAllowed(channel) {
+  const allowedChannels = getAllowedBotChannels();
+  if (allowedChannels && !allowedChannels.includes(channel)) {
+    throw new Error(`IRC channel ${channel} is not allowed for A9 Superchat callbacks`);
+  }
+}
+
+async function assertCallbackRateLimit({ channel, actor, action }) {
+  const limit = Number(process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE || 0);
+  if (!limit) {
+    return;
+  }
+
+  const minute = Math.floor(Date.now() / 60000);
+  const key = `callback-rate:${channel}:${actor || 'unknown'}:${action || 'callback'}:${minute}`;
+  const current = Number(await storage.get(key) || 0);
+  if (current >= limit) {
+    throw new Error('A9 Superchat callback rate limit reached');
+  }
+  await storage.set(key, current + 1);
+}
+
 function sanitizeSettings(settings) {
   assertObject(settings, 'settings');
   const next = { ...DEFAULT_SETTINGS, ...settings };
@@ -85,10 +127,14 @@ function sanitizeSettings(settings) {
   next.relayUrl = String(next.relayUrl || '').trim();
   next.defaultServer = String(next.defaultServer || DEFAULT_SETTINGS.defaultServer).trim();
   next.defaultPort = Number(next.defaultPort || DEFAULT_SETTINGS.defaultPort);
+  if (next.defaultServer === 'irc.a9group.net' && next.defaultPort === 8097) {
+    next.defaultPort = 443;
+  }
   next.defaultUseTls = Boolean(next.defaultUseTls);
   next.defaultChannels = Array.isArray(next.defaultChannels)
     ? next.defaultChannels.map(sanitizeChannel).slice(0, 20)
     : DEFAULT_SETTINGS.defaultChannels;
+  next.autoConnect = Boolean(next.autoConnect);
   next.transcriptRetentionDays = Math.max(1, Math.min(90, Number(next.transcriptRetentionDays || 14)));
   next.allowRovoInvites = Boolean(next.allowRovoInvites);
   next.allowDccProxy = Boolean(next.allowDccProxy);
@@ -277,6 +323,104 @@ async function rovoChannelSummaryAction(payload) {
   return job;
 }
 
+function sanitizeBotContextPayload(payload, context) {
+  assertObject(payload, 'payload');
+  const channel = sanitizeChannel(payload.channel);
+  const transcript = Array.isArray(payload.transcript)
+    ? payload.transcript.map((line) => sanitizeText(line, 240)).filter(Boolean).slice(-25)
+    : [];
+
+  return {
+    channel,
+    accountId: context && context.accountId ? context.accountId : 'unknown',
+    source: sanitizeText(payload.source || 'forge-browser', 80),
+    pageTitle: sanitizeText(payload.pageTitle || 'A9 Superchat browser context', 160),
+    pageUrl: sanitizeText(payload.pageUrl || '', 500),
+    selectedText: sanitizeText(payload.selectedText || '', 1500),
+    note: sanitizeText(payload.note || '', 1200),
+    transcript,
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+  };
+}
+
+async function prepareBotContext(payload, context) {
+  const botContext = sanitizeBotContextPayload(payload, context);
+  const contextId = crypto.randomBytes(8).toString('hex');
+  await storage.set(botContextKey(contextId), botContext);
+  await storage.set(channelAuditKey(botContext.channel), {
+    type: 'bot-context-prepared',
+    contextId,
+    channel: botContext.channel,
+    accountId: botContext.accountId,
+    source: botContext.source,
+    pageTitle: botContext.pageTitle,
+    createdAt: botContext.createdAt,
+    expiresAt: botContext.expiresAt
+  });
+
+  return {
+    ok: true,
+    contextId,
+    channel: botContext.channel,
+    expiresAt: botContext.expiresAt,
+    ircLine: `A9SysOp: context ${contextId}`
+  };
+}
+
+async function activateBotContext({ channel, actorNick, contextId }) {
+  const id = String(contextId || '').trim();
+  if (!/^[a-f0-9]{16}$/.test(id)) {
+    throw new Error('context id must be a 16 character hex token');
+  }
+
+  const botContext = await storage.get(botContextKey(id));
+  if (!botContext) {
+    throw new Error('context id was not found or has expired');
+  }
+  if (new Date(botContext.expiresAt).getTime() < Date.now()) {
+    throw new Error('context id has expired');
+  }
+  if (botContext.channel !== channel) {
+    throw new Error(`context id is scoped to ${botContext.channel}`);
+  }
+
+  const activeContext = {
+    ...botContext,
+    contextId: id,
+    activatedBy: actorNick,
+    activatedAt: new Date().toISOString()
+  };
+  await storage.set(activeChannelContextKey(channel), activeContext);
+  await storage.set(channelAuditKey(channel), {
+    type: 'bot-context-activated',
+    contextId: id,
+    channel,
+    actorNick,
+    source: botContext.source,
+    pageTitle: botContext.pageTitle,
+    createdAt: activeContext.activatedAt
+  });
+
+  const pieces = [
+    `Loaded browser context ${id}`,
+    botContext.pageTitle ? `from "${botContext.pageTitle}"` : '',
+    botContext.transcript.length ? `with ${botContext.transcript.length} recent channel lines` : '',
+    'for this channel.'
+  ].filter(Boolean);
+
+  return {
+    ok: true,
+    context: activeContext,
+    actions: [
+      botMessage({
+        channel,
+        text: `${pieces.join(' ')} Ask, invite, or distill with that context in Forge.`
+      })
+    ]
+  };
+}
+
 resolver.define('inviteAgentToChannel', async ({ payload, context }) => {
   assertObject(payload, 'payload');
   const settings = await getSettings(context.accountId);
@@ -302,6 +446,10 @@ resolver.define('askAgentInChannel', async ({ payload }) => {
 resolver.define('summarizeChannel', async ({ payload }) => {
   assertObject(payload, 'payload');
   return rovoChannelSummaryAction(payload);
+});
+
+resolver.define('prepareBotContext', async ({ payload, context }) => {
+  return prepareBotContext(payload, context);
 });
 
 function jsonResponse(statusCode, body) {
@@ -352,6 +500,9 @@ async function ircCommand(event) {
     const command = String(body.command || '').trim().replace(/^\//, '').toLowerCase();
     const args = Array.isArray(body.args) ? body.args.map((arg) => String(arg)) : [];
 
+    assertBotChannelAllowed(channel);
+    await assertCallbackRateLimit({ channel, actor: actorNick, action: command || 'help' });
+
     await recordBotEnvelope(channel, {
       type: 'irc-command',
       actorNick,
@@ -366,7 +517,7 @@ async function ircCommand(event) {
           botMessage({
             channel,
             target: actorNick,
-            text: 'A9 commands: invite [agent], ask ISSUE-123 question, distill [rca|timeline|handoff|best-practice], help.'
+            text: 'A9 commands: context ID, invite [agent], ask ISSUE-123 question, distill [rca|timeline|handoff|best-practice], help.'
           })
         ]
       });
@@ -385,6 +536,12 @@ async function ircCommand(event) {
           })
         ]
       });
+    }
+
+    if (command === 'context' || command === 'ctx' || command === 'summon') {
+      const contextId = args[0] || body.contextId;
+      const result = await activateBotContext({ channel, actorNick, contextId });
+      return jsonResponse(202, result);
     }
 
     if (command === 'ask') {
@@ -425,7 +582,7 @@ async function ircCommand(event) {
         botMessage({
           channel,
           target: actorNick,
-          text: `Unsupported A9 command "${sanitizeText(command, 40)}". Try: help, invite, ask, or distill.`
+          text: `Unsupported A9 command "${sanitizeText(command, 40)}". Try: help, context, invite, ask, or distill.`
         })
       ]
     });
@@ -448,7 +605,10 @@ async function ircEvent(event) {
     const channel = sanitizeChannel(body.channel || '#a9superchat');
     const type = String(body.type || '').trim().toLowerCase();
     const actorNick = sanitizeNick(body.actorNick, 'irc-user');
-    const botNick = sanitizeNick(body.botNick, 'A9Rovo');
+    const botNick = sanitizeNick(body.botNick, 'A9SysOp');
+
+    assertBotChannelAllowed(channel);
+    await assertCallbackRateLimit({ channel, actor: actorNick, action: type || 'event' });
 
     await recordBotEnvelope(channel, {
       type: 'irc-event',
@@ -525,12 +685,18 @@ module.exports = {
   ircEvent,
   rovoTriageAction,
   rovoChannelSummaryAction,
+  prepareBotContext,
   _private: {
     sanitizeSettings,
     sanitizeChannel,
     sanitizeAgentName,
     sanitizeNick,
+    sanitizeText,
+    assertBotChannelAllowed,
+    assertCallbackRateLimit,
     validateBotToken,
-    userSettingsKey
+    userSettingsKey,
+    botContextKey,
+    activeChannelContextKey
   }
 };

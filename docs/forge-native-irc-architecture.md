@@ -100,7 +100,9 @@ This repository now includes:
 
 - `manifest.yml`: Jira/Confluence global pages, Jira admin page, Rovo agent/actions, incident ingest webtrigger, IRC command webtrigger, and IRC event webtrigger.
 - `src/index.js`: resolver bootstrap, settings persistence, Rovo triage action, summary queue stub, incident ingest handler, IRC command callback, and IRC event callback.
+- `src/irc-bot-lib.js`: shared IRC parsing, command addressing, redaction, rate-limit, and Forge action translation helpers.
 - `src/frontend/index.jsx`: UI Kit native shell for navigation, setup, Rovo controls, audit status, WebSocket testing, and a native chat console.
+- `bot/a9sysop.js`: persistent Node IRC bot using real TCP/TLS IRC sockets and real Forge webtrigger callbacks.
 - `resources/rovo/prompts/incident-agent.txt`: first Rovo prompt.
 - `tests/index.test.js`: resolver and permission-boundary-style unit tests with mocked Forge APIs.
 
@@ -112,6 +114,8 @@ The native UI Kit setup panel includes a WebSocket tester for validating IRC Web
 
 The Agents tab exposes native UI Kit controls for the high-value workflows: invite a Rovo agent into a channel, ask a Jira-grounded triage question in IRC, and queue a channel distillation job. The resolvers validate channel names, enforce the `allowRovoInvites` setting, fetch Jira issue context for triage questions, and persist queued relay/audit envelopes.
 
-The bot callback endpoints expose the same workflows to IRC itself. A persistent bot can call the command webtrigger for `help`, `invite`, `ask`, and `distill`; it can call the event webtrigger for joins and IRC invite events. Forge returns bounded `irc-message` actions so the bot can welcome new joiners, acknowledge agent invites, and post queued Rovo triage text back into the channel. If `SUPERCHAT_BOT_TOKEN` is set, callbacks require the same value in the `x-superchat-bot-token` header. Before production exposure, add tenant/channel allowlists and rate limits.
+The bot callback endpoints expose the same workflows to IRC itself. The included persistent bot calls the command webtrigger for `help`, `context`, `invite`, `ask`, and `distill`; it calls the event webtrigger for joins and IRC invite events. Forge returns bounded `irc-message` actions so the bot can welcome new joiners, activate browser-prepared context, acknowledge agent invites, and post queued Rovo triage text back into the channel. If `SUPERCHAT_BOT_TOKEN` is set, callbacks require the same value in the `x-superchat-bot-token` header. Production exposure should also set `SUPERCHAT_ALLOWED_CHANNELS` and `SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE`, which are enforced inside the Forge webtrigger handlers.
+
+The browser context handoff uses IRC as the SMS-like transport instead of as a data dump. A UI button calls `prepareBotContext`, which stores a short-lived Forge context bundle containing page metadata and recent visible channel lines. The browser then sends only `A9SysOp: context <id>` into IRC over its existing WebSocket connection. The persistent bot receives that addressed command, calls Forge, and Forge activates the context for that tenant/channel. This keeps RAG payloads in Forge storage while letting IRC trigger multi-agent and multi-bot automation.
 
 The legacy IRC renderer used inline style attributes for mIRC colors and nick coloring. The native UI Kit console avoids that CSP exception; a later hardening pass should add bounded formatting support through UI Kit-safe token rendering.

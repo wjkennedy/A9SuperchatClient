@@ -1,0 +1,63 @@
+services:
+  inspircd:
+    image: inspircd/inspircd-docker:latest
+    container_name: a9superchat-inspircd
+    restart: unless-stopped
+    ports:
+      - "6667:6667"
+      - "8097:8097"
+    volumes:
+      - ./docker/inspircd/a9superchat.conf:/inspircd/conf.d/a9superchat.conf:ro
+      - ./docker/inspircd/motd.txt:/conf/docker.motd:ro
+    networks:
+      - a9superchat-irc
+    environment:
+      INSP_NET_SUFFIX: .a9group.net
+      INSP_NET_NAME: A9Superchat
+      INSP_SERVER_NAME: irc.a9group.net
+      INSP_ADMIN_NAME: A9 Group
+      INSP_ADMIN_DESC: A9 Superchat Operators
+      INSP_ADMIN_EMAIL: ops@a9group.net
+      INSP_ENABLE_DNSBL: "no"
+
+  a9sysop:
+    build:
+      context: .
+      dockerfile: docker/a9sysop/Dockerfile
+    container_name: a9superchat-a9sysop
+    restart: unless-stopped
+    depends_on:
+      inspircd:
+        condition: service_healthy
+    environment:
+      IRC_SERVER: inspircd
+      IRC_PORT: "6667"
+      IRC_TLS: "false"
+      IRC_NICK: A9SysOp
+      IRC_USERNAME: a9sysop
+      IRC_REALNAME: A9 Superchat Channel Operator
+      IRC_CHANNELS: "#a9superchat,#atlassian"
+      SUPERCHAT_COMMAND_URL: ${SUPERCHAT_COMMAND_URL:-}
+      SUPERCHAT_EVENT_URL: ${SUPERCHAT_EVENT_URL:-}
+      SUPERCHAT_INCIDENT_INGEST_URL: ${SUPERCHAT_INCIDENT_INGEST_URL:-}
+      SUPERCHAT_BOT_TOKEN: ${SUPERCHAT_BOT_TOKEN:-}
+      IRC_PRIVATE_TARGETS: ${IRC_PRIVATE_TARGETS:-false}
+      IRC_RECONNECT_MS: ${IRC_RECONNECT_MS:-15000}
+      IRC_COMMAND_RATE_LIMIT_PER_MINUTE: ${IRC_COMMAND_RATE_LIMIT_PER_MINUTE:-6}
+    networks:
+      - a9superchat-irc
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: a9superchat-cloudflared
+    restart: unless-stopped
+    depends_on:
+      inspircd:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --loglevel ${CLOUDFLARED_LOGLEVEL:-info} run --token ${CLOUDFLARED_TOKEN}
+    networks:
+      - a9superchat-irc
+
+networks:
+  a9superchat-irc:
+    name: a9superchat-irc

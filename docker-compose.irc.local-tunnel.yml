@@ -1,0 +1,6 @@
+services:
+  cloudflared:
+    command: tunnel --config /etc/cloudflared/config.yml --no-autoupdate --loglevel ${CLOUDFLARED_LOGLEVEL:-info} run
+    volumes:
+      - ./docker/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./docker/cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro

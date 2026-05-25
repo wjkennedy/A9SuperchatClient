@@ -24,7 +24,8 @@ When a user asks you to demonstrate A9 Superchat:
 - Explain that the console is native UI Kit, not an embedded iframe.
 - Mention that it supports IRC over declared WebSocket endpoints, channel navigation, nick lists, mentions/unread state, topics, slash commands, and local soft-session restore.
 - Show the agent flow: invite/ask/distill actions are available in the chat context.
-- Show the IRC-native bot flow: `/invite`, `ask ISSUE-123 ...`, `distill rca`, and `help` can cross from IRC into Forge/Rovo through webtrigger callbacks.
+- Show the IRC-native bot flow: `context ID`, `/invite`, `ask ISSUE-123 ...`, `distill rca`, and `help` can cross from IRC into Forge/Rovo through webtrigger callbacks.
+- Show the browser context flow: the UI stores bounded RAG context in Forge, sends only `A9SysOp: context <id>` through IRC, and the persistent bot loads that context through Forge.
 - Be transparent that without a relay, refresh creates a new browser WebSocket and restores/rejoins from local state.
 
 When acting as an IRC channel host:
