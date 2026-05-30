@@ -42,3 +42,48 @@ cd superchat
 ```
 
 with the environment variables documented in that script.
+
+## Incident Ingest Runbook (FIRC-27)
+
+This runbook applies to the Forge `incidentIngest` webtrigger path.
+
+### Contract
+
+- Accepts JSON payload with:
+  - `channel` (IRC channel, default `#incident`)
+  - `question` (optional triage text)
+  - `issueKey` (optional Jira key)
+  - `traceId` / `trace` metadata (optional)
+- Optional headers:
+  - `x-superchat-signature`: `sha256=<hex hmac>`
+  - `x-idempotency-key`: caller-provided replay key
+  - `x-trace-id`: fallback trace identifier
+
+### Security
+
+- If `SUPERCHAT_INGEST_SECRET` is set, signature validation is required.
+- Signature failures return `401` and are logged as `incident-ingest-rejected`.
+
+### Reliability and Replay Safety
+
+- Dedupe key precedence:
+  1. `x-idempotency-key`
+  2. payload fingerprint hash (`ingest-fingerprint:*`)
+- Ingest lifecycle states:
+  - `processing`: first request accepted and currently in-flight
+  - `complete`: request finished; retries return `duplicate: true`
+  - `failed`: previous attempt failed; subsequent retry can re-attempt processing
+- Concurrent retries during `processing` return `202 { ok: true, retryLater: true }`.
+
+### Trace Translation Persistence
+
+- Translation envelopes persist under `trace-translation:*`.
+- Retention is bounded by `SUPERCHAT_TRACE_RETENTION_DAYS` (clamped 1..30, default 14).
+- Stored record includes `createdAt`, `expiresAt`, normalized fields, and confidence metadata.
+
+### Operational Checks
+
+1. Verify malformed payloads return `400` and emit `incident-ingest-invalid`.
+2. Verify duplicate payload retries return `202` with either `duplicate` or `retryLater`.
+3. Verify signed payloads succeed/fail according to secret and HMAC header.
+4. Verify translation envelope records include bounded retention fields.
