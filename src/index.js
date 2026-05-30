@@ -642,10 +642,14 @@ resolver.define('prepareBotContext', async ({ payload, context }) => {
 });
 
 function jsonResponse(statusCode, body) {
+  const payload = body && typeof body === 'object' ? { ...body } : body;
+  if (payload && Array.isArray(payload.actions)) {
+    payload.actions = boundedIrcActions(payload.actions);
+  }
   return {
     statusCode,
     headers: { 'content-type': ['application/json'] },
-    body: JSON.stringify(body)
+    body: JSON.stringify(payload)
   };
 }
 
@@ -775,9 +779,25 @@ function botMessage({ channel, text, target = null }) {
   return {
     type: 'irc-message',
     channel: sanitizeChannel(channel),
-    target,
-    text: sanitizeText(text, 450)
+    target: target ? sanitizeNick(target, null) : null,
+    text: sanitizeText(text, 300)
   };
+}
+
+function boundedIrcActions(actions, maxActions = 3) {
+  const list = Array.isArray(actions) ? actions : [];
+  const safe = [];
+  for (const action of list.slice(0, maxActions)) {
+    if (!action || action.type !== 'irc-message') {
+      continue;
+    }
+    safe.push(botMessage({
+      channel: action.channel,
+      target: action.target || null,
+      text: action.text
+    }));
+  }
+  return safe;
 }
 
 async function recordBotEnvelope(channel, envelope) {
@@ -1138,6 +1158,7 @@ module.exports = {
     parseContractVersion,
     parseIrcCommandEnvelope,
     parseIrcEventEnvelope,
-    canonicalCommand
+    canonicalCommand,
+    boundedIrcActions
   }
 };

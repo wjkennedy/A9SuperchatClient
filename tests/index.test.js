@@ -451,6 +451,20 @@ test('irc command alias ? routes to help handler', async () => {
   expect(body.actions[0].text).toContain('A9 commands');
 });
 
+test('bounded action sanitizer enforces max count and message bounds', () => {
+  const actions = app._private.boundedIrcActions([
+    { type: 'irc-message', channel: '#a9superchat', text: 'one', target: 'Ada' },
+    { type: 'noop', channel: '#a9superchat', text: 'skip' },
+    { type: 'irc-message', channel: '#a9superchat', text: 'x'.repeat(1000), target: 'Ada' },
+    { type: 'irc-message', channel: '#a9superchat', text: 'three', target: 'Ada' },
+    { type: 'irc-message', channel: '#a9superchat', text: 'four', target: 'Ada' }
+  ]);
+
+  expect(actions).toHaveLength(2);
+  expect(actions[0].text).toBe('one');
+  expect(actions[1].text.length).toBeLessThanOrEqual(300);
+});
+
 test('irc event webtrigger welcomes new joiners', async () => {
   const response = await app.ircEvent({
     body: JSON.stringify({
