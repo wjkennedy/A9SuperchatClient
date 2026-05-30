@@ -280,7 +280,10 @@ function sanitizeAgentQueueRecord(record) {
     createdAt: sanitizeText(value.createdAt || new Date().toISOString(), 80),
     issueKey: value.issueKey ? sanitizeText(value.issueKey, 40) : null,
     agentName: value.agentName ? sanitizeAgentName(value.agentName) : null,
-    format: value.format ? sanitizeText(value.format, 80) : null
+    format: value.format ? sanitizeText(value.format, 80) : null,
+    source: value.source ? sanitizeText(value.source, 40) : null,
+    workflow: value.workflow ? sanitizeText(value.workflow, 60) : null,
+    correlationId: value.correlationId ? sanitizeText(value.correlationId, 80) : null
   };
 }
 
@@ -417,12 +420,15 @@ async function fetchIssueSummary(issueKey) {
   };
 }
 
-async function queueRelayMessage({ channel, actor, text, issue }) {
+async function queueRelayMessage({ channel, actor, text, issue, source = 'forge', workflow = 'relay-message', correlationId = null }) {
   const message = {
     channel: sanitizeChannel(channel),
     actor: String(actor || 'A9 Superchat').slice(0, 80),
     text: String(text || '').slice(0, 1000),
     issue: issue || null,
+    source: sanitizeText(source, 40),
+    workflow: sanitizeText(workflow, 60),
+    correlationId: correlationId ? sanitizeText(correlationId, 80) : null,
     createdAt: new Date().toISOString(),
     status: 'queued'
   };
@@ -438,6 +444,9 @@ async function queueRelayMessage({ channel, actor, text, issue }) {
     text: message.text,
     status: message.status,
     issueKey: issue && issue.issueKey,
+    source: message.source,
+    workflow: message.workflow,
+    correlationId: message.correlationId,
     createdAt: message.createdAt
   });
 
@@ -479,11 +488,19 @@ async function rovoTriageAction(payload) {
   }
 
   const text = `[Rovo triage] ${issue.issueKey}: ${question}`;
+  const correlationId = crypto
+    .createHash('sha256')
+    .update(`${issue.issueKey}|${channel}|${question}`)
+    .digest('hex')
+    .slice(0, 24);
   return queueRelayMessage({
     channel,
     actor: 'A9 Superchat Channel Operator',
     text,
-    issue
+    issue,
+    source: 'rovo-action',
+    workflow: 'jira-grounded-triage-ask',
+    correlationId
   });
 }
 

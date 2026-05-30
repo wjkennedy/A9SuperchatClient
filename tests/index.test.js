@@ -129,9 +129,16 @@ test('queues Rovo triage message with Jira issue context', async () => {
 
   expect(result.channel).toBe('#p1');
   expect(result.issue.summary).toBe('Portal outage');
+  expect(result.source).toBe('rovo-action');
+  expect(result.workflow).toBe('jira-grounded-triage-ask');
+  expect(result.correlationId).toMatch(/^[a-f0-9]{24}$/);
   expect(mockStorage.set).toHaveBeenCalledTimes(2);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('relay-message');
+  expect(mockStorage.set.mock.calls[0][1].source).toBe('rovo-action');
+  expect(mockStorage.set.mock.calls[0][1].workflow).toBe('jira-grounded-triage-ask');
   expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
+  expect(mockStorage.set.mock.calls[1][1][0].source).toBe('rovo-action');
+  expect(mockStorage.set.mock.calls[1][1][0].workflow).toBe('jira-grounded-triage-ask');
 });
 
 test('bootstrap prefers Jira identity and storage settings', async () => {
