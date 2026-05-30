@@ -544,31 +544,53 @@ async function rovoTriageAction(payload) {
   });
 }
 
-async function rovoChannelSummaryAction(payload) {
+function buildSummaryJobEnvelope(payload) {
+  assertObject(payload, 'payload');
   const channel = sanitizeChannel(payload.channel);
-  assertBotChannelAllowed(channel);
-  const id = envelopeId('summary');
-  const job = {
-    id,
+  const requestedBy = sanitizeText(payload.requestedBy || payload.actor || 'A9 Superchat Channel Operator', 120);
+  const source = sanitizeText(payload.source || 'rovo-action', 60);
+  const format = sanitizeText(payload.format || 'rca', 80).toLowerCase();
+  const window = payload.window && typeof payload.window === 'object'
+    ? {
+      start: sanitizeText(payload.window.start || '', 60) || null,
+      end: sanitizeText(payload.window.end || '', 60) || null
+    }
+    : { start: null, end: null };
+
+  return {
+    schemaVersion: 1,
+    jobType: 'channel-distillation',
+    id: envelopeId('summary'),
     channel,
-    format: payload.format || 'rca',
+    format,
+    window,
+    requestedBy,
+    source,
     status: 'queued',
     note: 'Transcript distillation should run as an async job over retained channel-audit records.'
   };
+}
+
+async function rovoChannelSummaryAction(payload) {
+  const job = buildSummaryJobEnvelope(payload);
+  const channel = job.channel;
+  assertBotChannelAllowed(channel);
   await storage.set(channelAuditKey(channel), {
-    envelopeId: id,
+    envelopeId: job.id,
     type: 'channel-summary',
     ...job,
     createdAt: new Date().toISOString()
   });
   await appendAgentQueueRecord({
-    id,
+    id: job.id,
     type: 'channel-summary',
     channel,
-    actor: 'A9 Superchat Channel Operator',
+    actor: job.requestedBy,
     text: `Distill ${channel} as ${job.format}`,
     status: job.status,
     format: job.format,
+    source: job.source,
+    workflow: job.jobType,
     createdAt: new Date().toISOString()
   });
   return job;
@@ -1222,6 +1244,7 @@ module.exports = {
     parseIrcEventEnvelope,
     canonicalCommand,
     boundedIrcActions,
-    envelopeId
+    envelopeId,
+    buildSummaryJobEnvelope
   }
 };

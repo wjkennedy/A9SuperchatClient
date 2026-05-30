@@ -197,6 +197,34 @@ test('channel summary action enforces channel allowlist outside callback path', 
   })).rejects.toThrow('not allowed');
 });
 
+test('buildSummaryJobEnvelope returns a versioned channel-distillation schema', () => {
+  const job = app._private.buildSummaryJobEnvelope({
+    channel: '#a9superchat',
+    format: 'timeline',
+    requestedBy: 'Ada',
+    source: 'irc-callback',
+    window: {
+      start: '2026-05-30T00:00:00Z',
+      end: '2026-05-30T02:00:00Z'
+    }
+  });
+
+  expect(job).toMatchObject({
+    schemaVersion: 1,
+    jobType: 'channel-distillation',
+    channel: '#a9superchat',
+    format: 'timeline',
+    requestedBy: 'Ada',
+    source: 'irc-callback',
+    status: 'queued',
+    window: {
+      start: '2026-05-30T00:00:00Z',
+      end: '2026-05-30T02:00:00Z'
+    }
+  });
+  expect(job.id).toMatch(/^summary-[a-f0-9]{12}$/);
+});
+
 test('bootstrap prefers Jira identity and storage settings', async () => {
   mockRequestJira.mockResolvedValueOnce({
     ok: true,
@@ -325,9 +353,14 @@ test('queues channel summary from resolver', async () => {
 
   expect(result.channel).toBe('#p1');
   expect(result.format).toBe('best-practice');
+  expect(result.schemaVersion).toBe(1);
+  expect(result.jobType).toBe('channel-distillation');
+  expect(result.id).toMatch(/^summary-[a-f0-9]{12}$/);
   expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set.mock.calls[0][1].envelopeId).toBe(result.id);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('channel-summary');
   expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
+  expect(mockStorage.set.mock.calls[1][1][0].workflow).toBe('channel-distillation');
 });
 
 test('prepares browser RAG context for IRC bot handoff', async () => {
