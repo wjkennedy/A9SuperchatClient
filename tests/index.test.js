@@ -41,6 +41,7 @@ beforeEach(() => {
   delete process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE;
   delete process.env.SUPERCHAT_INGEST_SECRET;
   delete process.env.SUPERCHAT_TRACE_RETENTION_DAYS;
+  delete process.env.SUPERCHAT_ARTIFACT_METADATA_RETENTION_DAYS;
 });
 
 test('sanitizes valid settings for Forge storage', () => {
@@ -364,6 +365,7 @@ test('blocks agent invites when disabled in settings', async () => {
 });
 
 test('queues channel summary from resolver', async () => {
+  process.env.SUPERCHAT_ARTIFACT_METADATA_RETENTION_DAYS = '200';
   const result = await app.handler.summarizeChannel({
     context: { accountId: 'abc-123' },
     payload: {
@@ -377,11 +379,18 @@ test('queues channel summary from resolver', async () => {
   expect(result.schemaVersion).toBe(1);
   expect(result.jobType).toBe('channel-distillation');
   expect(result.id).toMatch(/^summary-[a-f0-9]{12}$/);
-  expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(result.artifactMetadata.id).toMatch(/^artifact-[a-f0-9]{12}$/);
+  expect(result.artifactMetadata.storageType).toBe('metadata-only');
+  expect(result.artifactMetadata.retentionDays).toBe(90);
+  expect(result.artifactMetadata.sourceJobId).toBe(result.id);
+  expect(mockStorage.set).toHaveBeenCalledTimes(3);
   expect(mockStorage.set.mock.calls[0][1].envelopeId).toBe(result.id);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('channel-summary');
   expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
   expect(mockStorage.set.mock.calls[1][1][0].workflow).toBe('channel-distillation');
+  const artifactCall = mockStorage.set.mock.calls.find(([key]) => String(key).startsWith('artifact-meta:'));
+  expect(artifactCall).toBeTruthy();
+  expect(artifactCall[1].retentionDays).toBe(90);
 });
 
 test('prepares browser RAG context for IRC bot handoff', async () => {

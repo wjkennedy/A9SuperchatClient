@@ -614,7 +614,15 @@ async function rovoChannelSummaryAction(payload) {
     workflow: job.jobType,
     createdAt: new Date().toISOString()
   });
-  return job;
+  const artifactMetadata = await persistGeneratedArtifactMetadata({
+    channel: job.channel,
+    format: job.format,
+    sourceJobId: job.id
+  });
+  return {
+    ...job,
+    artifactMetadata
+  };
 }
 
 function sanitizeBotContextPayload(payload, context) {
@@ -1008,6 +1016,14 @@ function getTraceRetentionDays() {
   return Math.max(1, Math.min(30, Math.floor(parsed)));
 }
 
+function getArtifactMetadataRetentionDays() {
+  const parsed = Number(process.env.SUPERCHAT_ARTIFACT_METADATA_RETENTION_DAYS || 14);
+  if (!Number.isFinite(parsed)) {
+    return 14;
+  }
+  return Math.max(1, Math.min(90, Math.floor(parsed)));
+}
+
 async function persistTraceTranslationEnvelope({ channel, translation, issueKey }) {
   const retentionDays = getTraceRetentionDays();
   const now = Date.now();
@@ -1024,6 +1040,26 @@ async function persistTraceTranslationEnvelope({ channel, translation, issueKey 
   };
   await storage.set(key, record);
   return { key, ...record };
+}
+
+async function persistGeneratedArtifactMetadata({ channel, format, sourceJobId, issueKey = null }) {
+  const now = Date.now();
+  const retentionDays = getArtifactMetadataRetentionDays();
+  const expiresAt = new Date(now + (retentionDays * 24 * 60 * 60 * 1000)).toISOString();
+  const id = envelopeId('artifact');
+  const record = {
+    id,
+    channel: sanitizeChannel(channel),
+    format: normalizeSummaryFormat(format),
+    sourceJobId: sanitizeText(sourceJobId || '', 80) || null,
+    issueKey: issueKey ? sanitizeText(issueKey, 40) : null,
+    storageType: 'metadata-only',
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+    retentionDays
+  };
+  await storage.set(`artifact-meta:${id}`, record);
+  return record;
 }
 
 async function ircCommand(event) {
@@ -1260,6 +1296,7 @@ module.exports = {
     ingestFingerprintKey,
     normalizeTraceEnvelope,
     getTraceRetentionDays,
+    getArtifactMetadataRetentionDays,
     parseContractVersion,
     parseIrcCommandEnvelope,
     parseIrcEventEnvelope,
