@@ -571,6 +571,27 @@ function buildSummaryJobEnvelope(payload) {
   };
 }
 
+function buildPublishTargetEnvelope(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const targetType = sanitizeText(source.targetType || 'jira-issue-comment-draft', 60).toLowerCase();
+  const allowed = new Set([
+    'jira-issue-comment-draft',
+    'confluence-page-draft'
+  ]);
+  if (!allowed.has(targetType)) {
+    throw new Error('targetType must be jira-issue-comment-draft or confluence-page-draft');
+  }
+
+  return {
+    schemaVersion: 1,
+    targetType,
+    issueKey: source.issueKey ? sanitizeText(source.issueKey, 40).toUpperCase() : null,
+    spaceKey: source.spaceKey ? sanitizeText(source.spaceKey, 40).toUpperCase() : null,
+    parentPageId: source.parentPageId ? sanitizeText(source.parentPageId, 80) : null,
+    pageTitle: source.pageTitle ? sanitizeText(source.pageTitle, 160) : null
+  };
+}
+
 const SUMMARY_FORMAT_ALIASES = {
   rca: 'rca',
   timeline: 'timeline',
@@ -594,6 +615,7 @@ function normalizeSummaryFormat(format) {
 
 async function rovoChannelSummaryAction(payload) {
   const job = buildSummaryJobEnvelope(payload);
+  const publishTarget = buildPublishTargetEnvelope(payload.publishTarget || payload);
   const channel = job.channel;
   assertBotChannelAllowed(channel);
   await storage.set(channelAuditKey(channel), {
@@ -621,6 +643,7 @@ async function rovoChannelSummaryAction(payload) {
   });
   return {
     ...job,
+    publishTarget,
     artifactMetadata
   };
 }
@@ -1304,6 +1327,7 @@ module.exports = {
     boundedIrcActions,
     envelopeId,
     buildSummaryJobEnvelope,
-    normalizeSummaryFormat
+    normalizeSummaryFormat,
+    buildPublishTargetEnvelope
   }
 };

@@ -247,6 +247,27 @@ test('summary job envelope rejects unsupported output format', () => {
   })).toThrow('format must be one of');
 });
 
+test('buildPublishTargetEnvelope validates and normalizes draft targets', () => {
+  const target = app._private.buildPublishTargetEnvelope({
+    targetType: 'confluence-page-draft',
+    spaceKey: 'eng',
+    pageTitle: 'P1 distillation draft'
+  });
+
+  expect(target).toMatchObject({
+    schemaVersion: 1,
+    targetType: 'confluence-page-draft',
+    spaceKey: 'ENG',
+    pageTitle: 'P1 distillation draft'
+  });
+});
+
+test('buildPublishTargetEnvelope rejects unsupported target type', () => {
+  expect(() => app._private.buildPublishTargetEnvelope({
+    targetType: 'jira-issue-comment-final'
+  })).toThrow('targetType must be jira-issue-comment-draft or confluence-page-draft');
+});
+
 test('bootstrap prefers Jira identity and storage settings', async () => {
   mockRequestJira.mockResolvedValueOnce({
     ok: true,
@@ -379,6 +400,10 @@ test('queues channel summary from resolver', async () => {
   expect(result.schemaVersion).toBe(1);
   expect(result.jobType).toBe('channel-distillation');
   expect(result.id).toMatch(/^summary-[a-f0-9]{12}$/);
+  expect(result.publishTarget).toMatchObject({
+    schemaVersion: 1,
+    targetType: 'jira-issue-comment-draft'
+  });
   expect(result.artifactMetadata.id).toMatch(/^artifact-[a-f0-9]{12}$/);
   expect(result.artifactMetadata.storageType).toBe('metadata-only');
   expect(result.artifactMetadata.retentionDays).toBe(90);
