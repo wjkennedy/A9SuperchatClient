@@ -225,6 +225,27 @@ test('buildSummaryJobEnvelope returns a versioned channel-distillation schema', 
   expect(job.id).toMatch(/^summary-[a-f0-9]{12}$/);
 });
 
+test('summary job envelope normalizes output format aliases', () => {
+  const best = app._private.buildSummaryJobEnvelope({
+    channel: '#a9superchat',
+    format: 'bestpractice'
+  });
+  const bp = app._private.buildSummaryJobEnvelope({
+    channel: '#a9superchat',
+    format: 'bp'
+  });
+
+  expect(best.format).toBe('best-practice');
+  expect(bp.format).toBe('best-practice');
+});
+
+test('summary job envelope rejects unsupported output format', () => {
+  expect(() => app._private.buildSummaryJobEnvelope({
+    channel: '#a9superchat',
+    format: 'deep-dive'
+  })).toThrow('format must be one of');
+});
+
 test('bootstrap prefers Jira identity and storage settings', async () => {
   mockRequestJira.mockResolvedValueOnce({
     ok: true,

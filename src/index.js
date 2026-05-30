@@ -549,7 +549,7 @@ function buildSummaryJobEnvelope(payload) {
   const channel = sanitizeChannel(payload.channel);
   const requestedBy = sanitizeText(payload.requestedBy || payload.actor || 'A9 Superchat Channel Operator', 120);
   const source = sanitizeText(payload.source || 'rovo-action', 60);
-  const format = sanitizeText(payload.format || 'rca', 80).toLowerCase();
+  const format = normalizeSummaryFormat(payload.format || 'rca');
   const window = payload.window && typeof payload.window === 'object'
     ? {
       start: sanitizeText(payload.window.start || '', 60) || null,
@@ -569,6 +569,27 @@ function buildSummaryJobEnvelope(payload) {
     status: 'queued',
     note: 'Transcript distillation should run as an async job over retained channel-audit records.'
   };
+}
+
+const SUMMARY_FORMAT_ALIASES = {
+  rca: 'rca',
+  timeline: 'timeline',
+  handoff: 'handoff',
+  summary: 'summary',
+  'best-practice': 'best-practice',
+  bestpractice: 'best-practice',
+  best_practice: 'best-practice',
+  best: 'best-practice',
+  bp: 'best-practice'
+};
+
+function normalizeSummaryFormat(format) {
+  const raw = sanitizeText(format || 'rca', 80).toLowerCase();
+  const canonical = SUMMARY_FORMAT_ALIASES[raw];
+  if (!canonical) {
+    throw new Error('format must be one of: rca, timeline, handoff, summary, best-practice');
+  }
+  return canonical;
 }
 
 async function rovoChannelSummaryAction(payload) {
@@ -1245,6 +1266,7 @@ module.exports = {
     canonicalCommand,
     boundedIrcActions,
     envelopeId,
-    buildSummaryJobEnvelope
+    buildSummaryJobEnvelope,
+    normalizeSummaryFormat
   }
 };
