@@ -391,7 +391,8 @@ test('queues channel summary from resolver', async () => {
     context: { accountId: 'abc-123' },
     payload: {
       channel: '#p1',
-      format: 'best-practice'
+      format: 'best-practice',
+      issueKey: 'CS-123'
     }
   });
 
@@ -408,6 +409,11 @@ test('queues channel summary from resolver', async () => {
   expect(result.artifactMetadata.storageType).toBe('metadata-only');
   expect(result.artifactMetadata.retentionDays).toBe(90);
   expect(result.artifactMetadata.sourceJobId).toBe(result.id);
+  expect(result.artifactMetadata.issueKey).toBe('CS-123');
+  expect(result.artifactMetadata.issueContextLink).toMatchObject({
+    type: 'jira-issue',
+    issueKey: 'CS-123'
+  });
   expect(mockStorage.set).toHaveBeenCalledTimes(3);
   expect(mockStorage.set.mock.calls[0][1].envelopeId).toBe(result.id);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('channel-summary');

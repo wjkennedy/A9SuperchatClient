@@ -639,7 +639,8 @@ async function rovoChannelSummaryAction(payload) {
   const artifactMetadata = await persistGeneratedArtifactMetadata({
     channel: job.channel,
     format: job.format,
-    sourceJobId: job.id
+    sourceJobId: job.id,
+    issueKey: publishTarget.issueKey
   });
   return {
     ...job,
@@ -1076,6 +1077,12 @@ async function persistGeneratedArtifactMetadata({ channel, format, sourceJobId, 
     format: normalizeSummaryFormat(format),
     sourceJobId: sanitizeText(sourceJobId || '', 80) || null,
     issueKey: issueKey ? sanitizeText(issueKey, 40) : null,
+    issueContextLink: issueKey
+      ? {
+        type: 'jira-issue',
+        issueKey: sanitizeText(issueKey, 40)
+      }
+      : null,
     storageType: 'metadata-only',
     createdAt: new Date(now).toISOString(),
     expiresAt,
