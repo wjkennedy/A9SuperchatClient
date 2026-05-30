@@ -134,17 +134,31 @@ function getHeader(headers, name) {
 }
 
 function validateBotToken(event) {
-  const expected = process.env.SUPERCHAT_BOT_TOKEN;
-  if (!expected) {
+  const configured = process.env.SUPERCHAT_BOT_TOKENS
+    ? String(process.env.SUPERCHAT_BOT_TOKENS).split(',').map((token) => token.trim()).filter(Boolean)
+    : [];
+  if (process.env.SUPERCHAT_BOT_TOKEN) {
+    configured.push(String(process.env.SUPERCHAT_BOT_TOKEN).trim());
+  }
+  if (process.env.SUPERCHAT_BOT_TOKEN_PREVIOUS) {
+    configured.push(String(process.env.SUPERCHAT_BOT_TOKEN_PREVIOUS).trim());
+  }
+  const expectedTokens = Array.from(new Set(configured)).filter(Boolean);
+  if (!expectedTokens.length) {
     return true;
   }
 
   const actual = getHeader(event && event.headers, 'x-superchat-bot-token');
-  if (!actual || actual.length !== expected.length) {
+  if (!actual) {
     return false;
   }
 
-  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+  return expectedTokens.some((expected) => {
+    if (actual.length !== expected.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+  });
 }
 
 function getAllowedBotChannels() {

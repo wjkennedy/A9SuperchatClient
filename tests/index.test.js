@@ -35,6 +35,8 @@ beforeEach(() => {
   mockRequestJira.mockReset();
   mockRequestConfluence.mockReset();
   delete process.env.SUPERCHAT_BOT_TOKEN;
+  delete process.env.SUPERCHAT_BOT_TOKEN_PREVIOUS;
+  delete process.env.SUPERCHAT_BOT_TOKENS;
   delete process.env.SUPERCHAT_ALLOWED_CHANNELS;
   delete process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE;
   delete process.env.SUPERCHAT_INGEST_SECRET;
@@ -596,6 +598,26 @@ test('irc command webtrigger accepts valid bot token when configured', async () 
   const response = await app.ircCommand({
     headers: {
       'x-superchat-bot-token': ['shared-secret']
+    },
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(mockStorage.set).toHaveBeenCalledTimes(1);
+});
+
+test('irc command webtrigger accepts previous bot token during rotation', async () => {
+  process.env.SUPERCHAT_BOT_TOKEN = 'new-secret';
+  process.env.SUPERCHAT_BOT_TOKEN_PREVIOUS = 'old-secret';
+
+  const response = await app.ircCommand({
+    headers: {
+      'x-superchat-bot-token': ['old-secret']
     },
     body: JSON.stringify({
       contractVersion: 1,
