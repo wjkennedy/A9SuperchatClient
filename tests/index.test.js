@@ -651,7 +651,7 @@ test('irc command webtrigger enforces configured channel allowlist', async () =>
 
 test('irc command webtrigger enforces configured storage-backed rate limit', async () => {
   process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE = '1';
-  mockStorage.get.mockResolvedValueOnce(1);
+  mockStorage.get.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
 
   const response = await app.ircCommand({
     body: JSON.stringify({
@@ -666,6 +666,81 @@ test('irc command webtrigger enforces configured storage-backed rate limit', asy
   expect(response.statusCode).toBe(400);
   expect(body.error).toContain('rate limit');
   expect(mockStorage.set).not.toHaveBeenCalled();
+});
+
+test('callback rate limit is enforced across different actions in same minute', async () => {
+  process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE = '2';
+  const memory = new Map();
+  mockStorage.get.mockImplementation(async (key) => memory.get(key) || 0);
+  mockStorage.set.mockImplementation(async (key, value) => {
+    memory.set(key, value);
+  });
+
+  const first = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+  const second = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'invite',
+      args: ['Ops', 'Agent']
+    })
+  });
+  const third = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'distill',
+      args: ['rca']
+    })
+  });
+  const thirdBody = JSON.parse(third.body);
+
+  expect(first.statusCode).toBe(200);
+  expect(second.statusCode).toBe(202);
+  expect(third.statusCode).toBe(400);
+  expect(thirdBody.error).toContain('rate limit');
+});
+
+test('callback rate limit resets on next minute bucket', async () => {
+  process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE = '1';
+  const memory = new Map();
+  mockStorage.get.mockImplementation(async (key) => memory.get(key) || 0);
+  mockStorage.set.mockImplementation(async (key, value) => {
+    memory.set(key, value);
+  });
+  const nowSpy = jest.spyOn(Date, 'now');
+  nowSpy.mockReturnValue(1000);
+
+  const first = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+  nowSpy.mockReturnValue(61000);
+  const second = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+  nowSpy.mockRestore();
+
+  expect(first.statusCode).toBe(200);
+  expect(second.statusCode).toBe(200);
 });
 
 test('irc command webtrigger redacts secrets before returning channel actions', async () => {

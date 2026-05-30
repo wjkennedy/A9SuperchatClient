@@ -182,12 +182,15 @@ async function assertCallbackRateLimit({ channel, actor, action }) {
   }
 
   const minute = Math.floor(Date.now() / 60000);
-  const key = `callback-rate:${channel}:${actor || 'unknown'}:${action || 'callback'}:${minute}`;
-  const current = Number(await storage.get(key) || 0);
-  if (current >= limit) {
+  const perActionKey = `callback-rate:${channel}:${actor || 'unknown'}:${action || 'callback'}:${minute}`;
+  const aggregateKey = `callback-rate:${channel}:${actor || 'unknown'}:all:${minute}`;
+  const currentPerAction = Number(await storage.get(perActionKey) || 0);
+  const currentAggregate = Number(await storage.get(aggregateKey) || 0);
+  if (currentPerAction >= limit || currentAggregate >= limit) {
     throw new Error('A9 Superchat callback rate limit reached');
   }
-  await storage.set(key, current + 1);
+  await storage.set(perActionKey, currentPerAction + 1);
+  await storage.set(aggregateKey, currentAggregate + 1);
 }
 
 function sanitizeSettings(settings) {
