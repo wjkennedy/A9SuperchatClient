@@ -615,4 +615,24 @@ test('incident ingest normalizes trace translation envelope fields', async () =>
       region: 'us-west-2'
     }
   });
+  expect(body.translation.confidence).toMatchObject({
+    score: 1,
+    populatedFields: 7,
+    totalFields: 7,
+    missingFields: []
+  });
+});
+
+test('trace translation confidence reflects missing enrichment fields', () => {
+  const normalized = app._private.normalizeTraceEnvelope(
+    { headers: {} },
+    {
+      traceId: 'trace-only',
+      frontend: { service: 'portal-ui' }
+    }
+  );
+
+  expect(normalized.confidence.score).toBeLessThan(1);
+  expect(normalized.confidence.missingFields).toContain('backend.service');
+  expect(normalized.confidence.missingFields).toContain('frontend.version');
 });

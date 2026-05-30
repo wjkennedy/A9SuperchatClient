@@ -733,7 +733,7 @@ function normalizeTraceEnvelope(event, body) {
   const traceIdHeader = getHeader(event && event.headers, 'x-trace-id');
   const traceId = sanitizeText(body.traceId || trace.id || traceIdHeader || '', 160) || null;
 
-  return {
+  const normalized = {
     traceId,
     frontend: {
       service: sanitizeText(frontend.service || frontend.name || '', 120) || null,
@@ -746,6 +746,25 @@ function normalizeTraceEnvelope(event, body) {
       region: sanitizeText(backend.region || body.backendRegion || '', 120) || null
     }
   };
+
+  const checks = [
+    ['traceId', normalized.traceId],
+    ['frontend.service', normalized.frontend.service],
+    ['frontend.version', normalized.frontend.version],
+    ['frontend.region', normalized.frontend.region],
+    ['backend.service', normalized.backend.service],
+    ['backend.version', normalized.backend.version],
+    ['backend.region', normalized.backend.region]
+  ];
+  const populated = checks.filter(([, value]) => value).length;
+  normalized.confidence = {
+    score: Number((populated / checks.length).toFixed(2)),
+    populatedFields: populated,
+    totalFields: checks.length,
+    missingFields: checks.filter(([, value]) => !value).map(([name]) => name)
+  };
+
+  return normalized;
 }
 
 async function ircCommand(event) {
