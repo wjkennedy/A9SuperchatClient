@@ -1,0 +1,166 @@
+{
+  "id": "4b477151-ab75-4f52-b5e9-dda82805046c",
+  "name": "ForgeLLM IRC",
+  "description": "Forge LLM with IRC convergence/hover",
+  "nodes": [
+    {
+      "id": "973dc6f6-173c-4326-9b80-796bbb3ef60e",
+      "type": "touchpoint",
+      "label": "Customer triggers webhook",
+      "position": {
+        "x": 73.75141361373937,
+        "y": 161.87500363919884
+      },
+      "description": "Customer passes Trace ID from built page content.",
+      "duration": "1s",
+      "aiOpportunity": "AI Agent picks up Trace ID\nUnpacks ID\nPulls signal from encoded systems (Frontend, backend (version numbers, region, etc))",
+      "criteria": [
+        {
+          "id": "fdf16d9a-c36e-403a-a383-1b277d103f64",
+          "condition": "submitted",
+          "type": "manual"
+        }
+      ]
+    },
+    {
+      "id": "b60bf005-4ad8-481e-9e6e-fe14994ee3e6",
+      "type": "touchpoint",
+      "label": "Swarm the issue",
+      "position": {
+        "x": 811.8234418380044,
+        "y": 359.8566742369938
+      },
+      "description": "In the Trace channel, people converge with bots to solve the issue in real time.\n\nIs there an outage? Paying a bounty?"
+    },
+    {
+      "id": "b217468f-cd01-4151-a63f-3b28fab9ac6a",
+      "type": "process",
+      "label": "Trace Translation",
+      "position": {
+        "x": 583.9271612419358,
+        "y": 161.9283371184969
+      },
+      "description": "Ingest trace id",
+      "aiOpportunity": "act on digest; find alignment in the teamwork profile",
+      "criteria": [
+        {
+          "id": "b68d88d5-9a84-4831-bb02-d0fc43f32a8f",
+          "condition": "created",
+          "type": "manual"
+        }
+      ]
+    },
+    {
+      "id": "d4f5f17c-738e-4d38-9a1c-61462a2a3611",
+      "type": "process",
+      "label": "Automations",
+      "position": {
+        "x": 1673.5283773025521,
+        "y": 149.81660131089433
+      },
+      "description": "Rovo Agent,\nIRC Bot",
+      "duration": "7d",
+      "automationPotential": "high",
+      "aiOpportunity": "Rovo Agent\nIRC Bot\nCanned messages\nMore",
+      "criteria": [
+        {
+          "id": "9028de4e-6717-4a51-bfaf-a69fa181b162",
+          "condition": "acted on",
+          "type": "manual"
+        }
+      ]
+    },
+    {
+      "id": "e0176cdc-8003-4dfa-aff3-dc2bcae27612",
+      "type": "handoff",
+      "label": "Customer joins #P1",
+      "position": {
+        "x": 1570.343534493334,
+        "y": 543.6191838885908
+      },
+      "description": "Customer rep joins #P1 with observations, communication",
+      "duration": "2h"
+    },
+    {
+      "id": "5a9f1825-4df4-4835-a13d-332a093b9e4a",
+      "type": "process",
+      "label": "#P1",
+      "position": {
+        "x": 2004.0785615178056,
+        "y": 286.89569451125766
+      },
+      "description": "P1 Incident management channel"
+    },
+    {
+      "id": "c43cae69-2229-4c4c-b3eb-6746f58bfc54",
+      "type": "endpoint",
+      "label": "Capture",
+      "position": {
+        "x": 2361.393573099722,
+        "y": 268.98475339190884
+      },
+      "description": "RCA, documentation, whatever. Pass it back to Rovo for inclusion/manifestation.",
+      "automationPotential": "high",
+      "aiOpportunity": "This is entirely Rovo's sweet spot."
+    }
+  ],
+  "edges": [
+    {
+      "id": "ccd63065-8fa1-4078-b4c5-8e8bc682198a",
+      "source": "973dc6f6-173c-4326-9b80-796bbb3ef60e",
+      "target": "b217468f-cd01-4151-a63f-3b28fab9ac6a",
+      "type": "default"
+    },
+    {
+      "id": "d412dfa4-e0dd-4b1e-90db-f586119cc1b6",
+      "source": "b217468f-cd01-4151-a63f-3b28fab9ac6a",
+      "target": "d4f5f17c-738e-4d38-9a1c-61462a2a3611",
+      "type": "default"
+    },
+    {
+      "id": "45e678ee-1cd8-4dc3-976d-db8e811097e9",
+      "source": "b217468f-cd01-4151-a63f-3b28fab9ac6a",
+      "target": "b60bf005-4ad8-481e-9e6e-fe14994ee3e6",
+      "type": "default"
+    },
+    {
+      "id": "43cdcef9-b0d8-407d-a112-7ea1d67d453a",
+      "source": "b60bf005-4ad8-481e-9e6e-fe14994ee3e6",
+      "target": "d4f5f17c-738e-4d38-9a1c-61462a2a3611",
+      "type": "default"
+    },
+    {
+      "id": "5873b3de-248b-46c4-a3b4-afb86509a78d",
+      "source": "b60bf005-4ad8-481e-9e6e-fe14994ee3e6",
+      "target": "e0176cdc-8003-4dfa-aff3-dc2bcae27612",
+      "type": "default"
+    },
+    {
+      "id": "66c5ac1e-d1e6-4e56-a607-264e1448620e",
+      "source": "e0176cdc-8003-4dfa-aff3-dc2bcae27612",
+      "target": "5a9f1825-4df4-4835-a13d-332a093b9e4a",
+      "type": "default"
+    },
+    {
+      "id": "b0dbf049-c9f0-431f-8a68-5be673155dd8",
+      "source": "b60bf005-4ad8-481e-9e6e-fe14994ee3e6",
+      "target": "5a9f1825-4df4-4835-a13d-332a093b9e4a",
+      "type": "default"
+    },
+    {
+      "id": "58082d71-1b0e-4191-8825-714b25ecc017",
+      "source": "d4f5f17c-738e-4d38-9a1c-61462a2a3611",
+      "target": "5a9f1825-4df4-4835-a13d-332a093b9e4a",
+      "type": "default"
+    },
+    {
+      "id": "7e4ac0db-59f2-42f9-80b4-99a6ee163070",
+      "source": "5a9f1825-4df4-4835-a13d-332a093b9e4a",
+      "target": "c43cae69-2229-4c4c-b3eb-6746f58bfc54",
+      "type": "default"
+    }
+  ],
+  "actors": [],
+  "createdAt": "2026-05-29T21:56:28.167Z",
+  "updatedAt": "2026-05-29T22:07:58.679Z"
+}

@@ -70,11 +70,12 @@ x-superchat-bot-token: <shared callback token>
 
 For production, set `SUPERCHAT_BOT_TOKEN` in Forge environment variables before exposing the bot publicly.
 
-The repository includes the production-shaped persistent bot at `bot/a9sysop.js`. It uses Node's built-in TCP/TLS socket support, joins configured IRC channels, responds to PING, parses addressed channel commands, posts real Forge webtrigger callbacks, and translates returned Forge `irc-message` actions back into IRC.
+The server runtime includes the production-shaped persistent bot at `SuperchatServer/bot/a9sysop.js`. It uses Node's built-in TCP/TLS socket support, joins configured IRC channels, responds to PING, parses addressed channel commands, posts real Forge webtrigger callbacks, and translates returned Forge `irc-message` actions back into IRC.
 
 Run it with:
 
 ```sh
+cd SuperchatServer
 npm run bot
 ```
 

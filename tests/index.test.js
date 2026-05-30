@@ -27,7 +27,6 @@ jest.mock('@forge/api', () => ({
 }));
 
 const app = require('../src/index');
-const ircBotLib = require('../src/irc-bot-lib');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -70,6 +69,39 @@ test('normalizes public A9 tunnel port to WSS default', () => {
   expect(settings.defaultPort).toBe(443);
 });
 
+test('sanitizes agent admin settings for default Rovo channel mappings', () => {
+  const settings = app._private.sanitizeAgentAdminSettings({
+    defaultAssignments: [
+      {
+        channel: '#p1',
+        agentName: 'Portal Triage Agent',
+        templateKey: 'incident-channel-operator'
+      }
+    ],
+    templates: [
+      {
+        key: 'incident-channel-operator',
+        name: 'Incident channel operator',
+        agentName: 'Portal Triage Agent',
+        description: 'Incident triage helper',
+        instructions: 'Use A9 Superchat actions to work in IRC.',
+        starters: ['Ask #p1 what evidence is missing'],
+        actions: ['superchat-triage-action']
+      }
+    ],
+    rovoStudioUrl: 'https://studio.atlassian.com'
+  });
+
+  expect(settings.defaultAssignments).toEqual([
+    {
+      channel: '#p1',
+      agentName: 'Portal Triage Agent',
+      templateKey: 'incident-channel-operator'
+    }
+  ]);
+  expect(settings.templates[0].actions).toEqual(['superchat-triage-action']);
+});
+
 test('queues Rovo triage message with Jira issue context', async () => {
   mockRequestJira.mockResolvedValueOnce({
     ok: true,
@@ -91,7 +123,9 @@ test('queues Rovo triage message with Jira issue context', async () => {
 
   expect(result.channel).toBe('#p1');
   expect(result.issue.summary).toBe('Portal outage');
-  expect(mockStorage.set).toHaveBeenCalledTimes(1);
+  expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set.mock.calls[0][1].type).toBe('relay-message');
+  expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
 });
 
 test('bootstrap prefers Jira identity and storage settings', async () => {
@@ -112,7 +146,67 @@ test('bootstrap prefers Jira identity and storage settings', async () => {
 
   expect(result.user.suggestedNick).toBe('adalovelace');
   expect(result.settings.defaultChannels).toEqual(['#ops']);
+  expect(result.agentAdminSettings.defaultAssignments[0].channel).toBe('#a9superchat');
   expect(result.capabilities.remoteRelayRequired).toBe(true);
+});
+
+test('saves agent admin settings', async () => {
+  const result = await app.handler.saveAgentAdminSettings({
+    payload: {
+      settings: {
+        defaultAssignments: [
+          {
+            channel: '#ops',
+            agentName: 'Ops Rovo Agent',
+            templateKey: 'incident-channel-operator'
+          }
+        ],
+        templates: [
+          {
+            key: 'incident-channel-operator',
+            name: 'Incident channel operator',
+            agentName: 'Ops Rovo Agent',
+            description: 'Ops incident agent',
+            instructions: 'Use A9 Superchat actions from Rovo Studio.',
+            starters: ['Ask #ops for missing evidence'],
+            actions: ['superchat-triage-action', 'superchat-channel-summary-action']
+          }
+        ]
+      }
+    }
+  });
+
+  expect(result.settings.defaultAssignments[0].channel).toBe('#ops');
+  expect(mockStorage.set).toHaveBeenCalledWith(
+    app._private.agentAdminSettingsKey(),
+    expect.objectContaining({
+      defaultAssignments: expect.any(Array),
+      templates: expect.any(Array)
+    })
+  );
+});
+
+test('returns recent agent queue records', async () => {
+  mockStorage.get.mockResolvedValueOnce([
+    {
+      id: 'queue-1',
+      type: 'relay-message',
+      channel: '#ops',
+      actor: 'A9 Superchat',
+      text: 'Queued triage',
+      status: 'queued',
+      createdAt: '2026-05-26T12:00:00.000Z'
+    }
+  ]);
+
+  const result = await app.handler.getAgentQueue({});
+
+  expect(result.queue).toHaveLength(1);
+  expect(result.queue[0]).toMatchObject({
+    channel: '#ops',
+    text: 'Queued triage',
+    status: 'queued'
+  });
 });
 
 test('invites an agent when Rovo invites are enabled', async () => {
@@ -131,8 +225,9 @@ test('invites an agent when Rovo invites are enabled', async () => {
 
   expect(result.agentName).toBe('Portal Triage Agent');
   expect(result.channel).toBe('#p1');
-  expect(mockStorage.set).toHaveBeenCalledTimes(1);
+  expect(mockStorage.set).toHaveBeenCalledTimes(2);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('agent-invite');
+  expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
 });
 
 test('blocks agent invites when disabled in settings', async () => {
@@ -161,8 +256,9 @@ test('queues channel summary from resolver', async () => {
 
   expect(result.channel).toBe('#p1');
   expect(result.format).toBe('best-practice');
-  expect(mockStorage.set).toHaveBeenCalledTimes(1);
+  expect(mockStorage.set).toHaveBeenCalledTimes(2);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('channel-summary');
+  expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
 });
 
 test('prepares browser RAG context for IRC bot handoff', async () => {
@@ -253,8 +349,9 @@ test('irc command webtrigger queues agent invite', async () => {
   expect(response.statusCode).toBe(202);
   expect(body.queued.agentName).toBe('Portal Triage Agent');
   expect(body.actions[0].text).toContain('Portal Triage Agent has been invited');
-  expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set).toHaveBeenCalledTimes(3);
   expect(mockStorage.set.mock.calls[1][1].type).toBe('agent-invite');
+  expect(mockStorage.set.mock.calls[2][0]).toBe(app._private.agentQueueKey());
 });
 
 test('irc command webtrigger queues Jira-grounded ask', async () => {
@@ -283,8 +380,9 @@ test('irc command webtrigger queues Jira-grounded ask', async () => {
   expect(response.statusCode).toBe(202);
   expect(body.queued.issue.summary).toBe('Portal outage');
   expect(body.actions[0].text).toBe('[Rovo triage] CS-123: What evidence is missing?');
-  expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set).toHaveBeenCalledTimes(3);
   expect(mockStorage.set.mock.calls[1][1].type).toBe('relay-message');
+  expect(mockStorage.set.mock.calls[2][0]).toBe(app._private.agentQueueKey());
 });
 
 test('irc event webtrigger welcomes new joiners', async () => {
@@ -323,8 +421,9 @@ test('irc event webtrigger queues invite on invite event', async () => {
   expect(response.statusCode).toBe(202);
   expect(body.queued.agentName).toBe('Engineering Rovo Agent');
   expect(body.actions[0].text).toContain('Engineering Rovo Agent has been invited');
-  expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set).toHaveBeenCalledTimes(3);
   expect(mockStorage.set.mock.calls[1][1].type).toBe('agent-invite');
+  expect(mockStorage.set.mock.calls[2][0]).toBe(app._private.agentQueueKey());
 });
 
 test('irc command webtrigger rejects invalid bot token when configured', async () => {
@@ -426,22 +525,4 @@ test('irc command webtrigger redacts secrets before returning channel actions', 
   expect(response.statusCode).toBe(202);
   expect(body.actions[0].text).toContain('token=<redacted>');
   expect(body.actions[0].text).not.toContain('super-secret-token');
-});
-
-test('irc bot lib parses addressed channel commands and translates Forge actions', () => {
-  const parsed = ircBotLib.parseAddressedCommand({
-    text: 'A9SysOp: ask CS-123 token=super-secret-token',
-    botNick: 'A9SysOp'
-  });
-
-  expect(parsed).toEqual({
-    command: 'ask',
-    args: ['CS-123', 'token=<redacted>']
-  });
-  expect(ircBotLib.ircActionToLines({
-    type: 'irc-message',
-    channel: '#a9superchat',
-    target: 'Ada',
-    text: 'Try: help'
-  })).toEqual(['PRIVMSG #a9superchat :Ada: Try: help']);
 });

@@ -131,10 +131,16 @@ permissions:
       backend:
         - address: "wss://irc.unrealircd.org:8000"
           inScopeEUD: true
-        - address: "*.superchat-relay.example.com"
+        - address: "*.a9group.net"
+          inScopeEUD: true
+        - address: "wss://irc.a9group.net:443"
           inScopeEUD: true
       client:
         - address: "wss://irc.a9group.net"
+          inScopeEUD: true
+        - address: "wss://irc.a9group.net:809"
+          inScopeEUD: true
+        - address: "wss://irc.a9group.net:8097"
           inScopeEUD: true
         - address: "wss://irc.a9group.net:443"
           inScopeEUD: true
@@ -146,5 +152,5 @@ permissions:
           inScopeEUD: true
         - address: "wss://irc.unrealircd.org:8000"
           inScopeEUD: true
-        - address: "*.superchat-relay.example.com"
+        - address: "*.a9group.net"
           inScopeEUD: true

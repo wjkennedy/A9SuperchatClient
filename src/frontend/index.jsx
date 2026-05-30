@@ -1,18 +1,39 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ForgeReconciler, {
+  Badge,
   Box,
   Button,
+  ButtonGroup,
   Checkbox,
   CodeBlock,
+  EmptyState,
+  Form,
+  FormFooter,
+  FormHeader,
+  FormSection,
   Heading,
+  HelperMessage,
+  Icon,
   Inline,
   Label,
   Lozenge,
   SectionMessage,
+  SectionMessageAction,
+  Select,
   Spinner,
   Stack,
+  Tab,
+  TabList,
+  TabPanel,
+  Tabs,
+  Tag,
+  TagGroup,
   Text,
-  Textfield
+  TextArea,
+  Textfield,
+  Tooltip,
+  useProductContext,
+  xcss
 } from '@forge/react';
 import { invoke } from '@forge/bridge';
 
@@ -36,6 +57,37 @@ const DEFAULT_AGENT_FORM = {
   summaryFormat: 'rca'
 };
 
+const DEFAULT_AGENT_ADMIN_FORM = {
+  channel: '#a9superchat',
+  agentName: 'A9 Superchat Channel Operator',
+  templateKey: 'incident-channel-operator'
+};
+
+const DEFAULT_AGENT_ADMIN_SETTINGS = {
+  defaultAssignments: [
+    {
+      channel: '#a9superchat',
+      agentName: 'A9 Superchat Channel Operator',
+      templateKey: 'incident-channel-operator'
+    }
+  ],
+  templates: [
+    {
+      key: 'incident-channel-operator',
+      name: 'Incident channel operator',
+      agentName: 'A9 Superchat Channel Operator',
+      description: 'Joins incident IRC channels, asks Jira-grounded triage questions, and distills retained transcript evidence.',
+      instructions: 'Create a Rovo agent that can use the A9 Superchat actions. It should ask concise triage questions in the configured IRC channel, use Jira issue context when available, summarize channel evidence, and never post secrets or private customer data into IRC.',
+      starters: [
+        'Ask #a9superchat what evidence is missing for this incident',
+        'Distill #a9superchat into an RCA draft'
+      ],
+      actions: ['superchat-triage-action', 'superchat-channel-summary-action']
+    }
+  ],
+  rovoStudioUrl: 'https://studio.atlassian.com'
+};
+
 const DEFAULT_TESTER = {
   url: 'wss://irc.a9group.net',
   nick: '',
@@ -46,6 +98,69 @@ const DEFAULT_TESTER = {
 };
 
 const CONSOLE_STATE_KEY = 'a9-superchat-console-state-v1';
+const IRC_WEBSOCKET_PROTOCOLS = ['text.ircv3.net', 'binary.ircv3.net'];
+const VIEW_ORDER = ['console', 'admin', 'agents', 'audit'];
+const VIEW_LABELS = {
+  console: 'Connect',
+  admin: 'Admin',
+  agents: 'Agents',
+  audit: 'Audit'
+};
+const TESTER_PROTOCOL_OPTIONS = [
+  { label: 'Text IRCv3', value: 'text' },
+  { label: 'Binary IRCv3', value: 'binary' },
+  { label: 'No subprotocol', value: 'none' }
+];
+const SUMMARY_FORMAT_OPTIONS = [
+  { label: 'Root cause analysis', value: 'rca' },
+  { label: 'Timeline', value: 'timeline' },
+  { label: 'Handoff', value: 'handoff' },
+  { label: 'Best practices', value: 'best-practice' },
+  { label: 'Short summary', value: 'summary' }
+];
+const pageHeaderStyles = xcss({
+  borderColor: 'color.border',
+  borderStyle: 'solid',
+  borderWidth: 'border.width',
+  borderRadius: 'radius.small',
+  padding: 'space.200',
+  backgroundColor: 'color.background.neutral.subtle'
+});
+const surfaceStyles = xcss({
+  borderColor: 'color.border',
+  borderStyle: 'solid',
+  borderWidth: 'border.width',
+  borderRadius: 'radius.small',
+  padding: 'space.200'
+});
+const subtleSurfaceStyles = xcss({
+  borderColor: 'color.border',
+  borderStyle: 'solid',
+  borderWidth: 'border.width',
+  borderRadius: 'radius.small',
+  padding: 'space.150',
+  backgroundColor: 'color.background.neutral.subtle'
+});
+const sidebarStyles = xcss({
+  borderColor: 'color.border',
+  borderStyle: 'solid',
+  borderWidth: 'border.width',
+  borderRadius: 'radius.small',
+  padding: 'space.150',
+  width: '220px'
+});
+const composerInputStyles = xcss({
+  width: '50%'
+});
+const scrollbackBoxStyles = xcss({
+  maxHeight: '480px',
+  overflowY: 'auto',
+  overflowX: 'auto',
+  borderColor: 'color.border',
+  borderStyle: 'solid',
+  borderWidth: 'border.width',
+  borderRadius: 'radius.small'
+});
 
 function loadConsoleState() {
   try {
@@ -130,19 +245,85 @@ function normalizePublicEndpoint(parsedUrl) {
   };
 }
 
+function normalizePublicWebSocketUrl(url) {
+  const parsedUrl = new URL(url);
+  const endpoint = normalizePublicEndpoint(parsedUrl);
+  return assembleWebSocketUrl(endpoint);
+}
+
 function hasConnectionConfig(settings) {
   return Boolean(settings?.defaultServer && Number(settings?.defaultPort));
 }
 
+function normalizeAgentAdminSettings(settings) {
+  return {
+    ...DEFAULT_AGENT_ADMIN_SETTINGS,
+    ...settings,
+    defaultAssignments: Array.isArray(settings?.defaultAssignments) && settings.defaultAssignments.length
+      ? settings.defaultAssignments
+      : DEFAULT_AGENT_ADMIN_SETTINGS.defaultAssignments,
+    templates: Array.isArray(settings?.templates) && settings.templates.length
+      ? settings.templates
+      : DEFAULT_AGENT_ADMIN_SETTINGS.templates
+  };
+}
+
+function buildRovoStudioPrompt(template, assignment) {
+  const starters = (template.starters || []).map((starter) => `- ${starter}`).join('\n');
+  const actions = (template.actions || []).map((action) => `- ${action}`).join('\n');
+  return [
+    `Agent name: ${assignment.agentName || template.agentName}`,
+    `Default IRC channel: ${assignment.channel}`,
+    '',
+    'Purpose:',
+    template.description,
+    '',
+    'Instructions:',
+    template.instructions,
+    '',
+    'Conversation starters:',
+    starters,
+    '',
+    'Required A9 Superchat actions:',
+    actions
+  ].join('\n');
+}
+
+function applySmartValues(text, context) {
+  const replacements = {
+    channel: context.activeConsoleWindow,
+    nick: context.consoleNick || context.consoleNickInput || 'superchat',
+    server: context.connectionUrl,
+    agent: context.agentName,
+    date: new Date().toLocaleDateString(),
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  };
+  return String(text || '').replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (match, key) => (
+    Object.prototype.hasOwnProperty.call(replacements, key) ? replacements[key] : match
+  ));
+}
+
+function extractMentions(text) {
+  return Array.from(new Set(
+    String(text || '')
+      .match(/(^|\s)@([A-Za-z0-9_[\]{}\\`^|-]{1,32})/g)?.map((match) => match.trim().slice(1)) || []
+  ));
+}
+
 function App() {
-  const [activeView, setActiveView] = useState('setup');
+  const productContext = useProductContext();
+  const [activeView, setActiveView] = useState('console');
   const [bootstrap, setBootstrap] = useState(null);
   const [form, setForm] = useState(DEFAULT_FORM);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [agentForm, setAgentForm] = useState(DEFAULT_AGENT_FORM);
+  const [agentAdminSettings, setAgentAdminSettings] = useState(DEFAULT_AGENT_ADMIN_SETTINGS);
+  const [agentAdminForm, setAgentAdminForm] = useState(DEFAULT_AGENT_ADMIN_FORM);
+  const [isSavingAgentAdmin, setIsSavingAgentAdmin] = useState(false);
   const [agentBusyAction, setAgentBusyAction] = useState(null);
   const [agentResult, setAgentResult] = useState(null);
+  const [agentQueue, setAgentQueue] = useState([]);
   const [contextBusy, setContextBusy] = useState(false);
   const [tester, setTester] = useState(DEFAULT_TESTER);
   const [testerLog, setTesterLog] = useState('... irc lines will go here ...');
@@ -163,6 +344,10 @@ function App() {
   const [message, setMessage] = useState(null);
   const testerSocketRef = useRef(null);
   const consoleSocketRef = useRef(null);
+  const connectionUrlRef = useRef('');
+  const formRef = useRef(DEFAULT_FORM);
+  const pendingConsoleUrlRef = useRef(null);
+  const manualRefreshRef = useRef(false);
   const consoleShouldReconnectRef = useRef(false);
   const reconnectTimerRef = useRef(null);
   const autoReconnectAttemptedRef = useRef(false);
@@ -178,14 +363,27 @@ function App() {
   }, [form.defaultServer, form.defaultPort, form.defaultUseTls]);
 
   useEffect(() => {
+    connectionUrlRef.current = connectionUrl;
+    formRef.current = form;
+  }, [connectionUrl, form]);
+
+  useEffect(() => {
     let mounted = true;
     invoke('bootstrap')
       .then((data) => {
         if (!mounted) return;
         const persisted = loadConsoleState();
         const normalizedSettings = normalizeSettings(data.settings);
+        const normalizedAgentAdminSettings = normalizeAgentAdminSettings(data.agentAdminSettings);
         setBootstrap(data);
         setForm(normalizedSettings);
+        setAgentAdminSettings(normalizedAgentAdminSettings);
+        setAgentQueue(Array.isArray(data.agentQueue) ? data.agentQueue : []);
+        setAgentAdminForm((current) => ({
+          ...current,
+          templateKey: normalizedAgentAdminSettings.templates[0]?.key || current.templateKey,
+          agentName: normalizedAgentAdminSettings.templates[0]?.agentName || current.agentName
+        }));
         setConsoleNickInput(persisted?.nickInput || data.user?.suggestedNick || 'superchat');
         if (persisted?.nick) setConsoleNick(persisted.nick);
         if (Array.isArray(persisted?.messages)) setConsoleMessages(persisted.messages.slice(-500));
@@ -222,6 +420,13 @@ function App() {
       if (consoleSocketRef.current) consoleSocketRef.current.close();
     };
   }, []);
+
+  useEffect(() => {
+    const moduleKey = productContext?.extension?.moduleKey || productContext?.moduleKey || '';
+    if (moduleKey.includes('admin')) {
+      setActiveView('admin');
+    }
+  }, [productContext?.extension?.moduleKey, productContext?.moduleKey]);
 
   useEffect(() => {
     consoleShouldReconnectRef.current = consoleShouldReconnect;
@@ -267,8 +472,14 @@ function App() {
         ? ", ['binary.ircv3.net', 'text.ircv3.net']"
         : '';
     const nick = tester.nick || 'dan';
+    let url = tester.url || 'wss://ws.example.org';
+    try {
+      url = normalizePublicWebSocketUrl(url);
+    } catch (err) {
+      // Keep the raw value in the example while the user is editing an invalid URL.
+    }
     return [
-      `let socket = new WebSocket('${tester.url || 'wss://ws.example.org'}'${protocols});`,
+      `let socket = new WebSocket('${url}'${protocols});`,
       "socket.addEventListener('open', () => {",
       `  socket.send('NICK ${nick}');`,
       "  socket.send('USER 0 0 0 0');",
@@ -366,6 +577,11 @@ function App() {
     clearConsoleAttention(windowName);
   }
 
+  function clearStatusHistory() {
+    setConsoleMessages((current) => current.filter((entry) => entry.target !== 'Status'));
+    clearConsoleAttention('Status');
+  }
+
   function setConsoleTopic(channel, topic) {
     if (!channel) return;
     setConsoleTopics((current) => ({ ...current, [channel]: topic || '' }));
@@ -419,6 +635,64 @@ function App() {
     setAgentForm((current) => ({ ...current, [name]: value }));
   }
 
+  function updateAgentAdminField(name, value) {
+    setAgentAdminForm((current) => ({ ...current, [name]: value }));
+  }
+
+  function selectAgentTemplate(templateKey) {
+    const template = agentAdminSettings.templates.find((item) => item.key === templateKey);
+    setAgentAdminForm((current) => ({
+      ...current,
+      templateKey,
+      agentName: template?.agentName || current.agentName
+    }));
+  }
+
+  function addDefaultAgentAssignment() {
+    const nextAssignment = {
+      channel: agentAdminForm.channel,
+      agentName: agentAdminForm.agentName,
+      templateKey: agentAdminForm.templateKey
+    };
+    setAgentAdminSettings((current) => ({
+      ...current,
+      defaultAssignments: current.defaultAssignments
+        .filter((assignment) => assignment.channel !== nextAssignment.channel)
+        .concat(nextAssignment)
+    }));
+    setMessage({ appearance: 'info', text: `${nextAssignment.agentName} staged as the default agent for ${nextAssignment.channel}. Save admin settings to keep it.` });
+  }
+
+  function removeDefaultAgentAssignment(channel) {
+    setAgentAdminSettings((current) => ({
+      ...current,
+      defaultAssignments: current.defaultAssignments.filter((assignment) => assignment.channel !== channel)
+    }));
+  }
+
+  async function saveAgentAdminSettings() {
+    setIsSavingAgentAdmin(true);
+    setMessage(null);
+    try {
+      const result = await invoke('saveAgentAdminSettings', { settings: agentAdminSettings });
+      setAgentAdminSettings(normalizeAgentAdminSettings(result.settings));
+      setMessage({ appearance: 'confirmation', text: 'Agent admin settings saved.' });
+    } catch (err) {
+      setMessage({ appearance: 'error', text: err.message || 'Unable to save agent admin settings.' });
+    } finally {
+      setIsSavingAgentAdmin(false);
+    }
+  }
+
+  async function refreshAgentQueue() {
+    try {
+      const result = await invoke('getAgentQueue');
+      setAgentQueue(Array.isArray(result.queue) ? result.queue : []);
+    } catch (err) {
+      setMessage({ appearance: 'error', text: err.message || 'Unable to refresh agent queue.' });
+    }
+  }
+
   async function runAgentAction(actionName, payload) {
     setAgentBusyAction(actionName);
     setAgentResult(null);
@@ -426,6 +700,7 @@ function App() {
     try {
       const result = await invoke(actionName, payload);
       setAgentResult(result);
+      await refreshAgentQueue();
       setMessage({ appearance: 'confirmation', text: 'Agent work queued for the relay.' });
     } catch (err) {
       setMessage({ appearance: 'error', text: err.message || 'Unable to queue agent work.' });
@@ -563,7 +838,12 @@ function App() {
     addTesterLog('[ircws-tester] Connecting...', true);
     try {
       const protocols = testerProtocols();
-      testerSocketRef.current = protocols.length ? new WebSocket(tester.url, protocols) : new WebSocket(tester.url);
+      const url = normalizePublicWebSocketUrl(tester.url);
+      if (url !== tester.url) {
+        updateTesterField('url', url);
+        addTesterLog(`[ircws-tester] Normalized public A9 URL to ${url}`);
+      }
+      testerSocketRef.current = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url);
     } catch (err) {
       testerSocketRef.current = null;
       setTesterConnected(false);
@@ -624,9 +904,19 @@ function App() {
       return;
     }
     const endpoint = normalizePublicEndpoint(parsed);
+    const nextUrl = assembleWebSocketUrl(endpoint);
+    if (nextUrl !== tester.url) updateTesterField('url', nextUrl);
+    connectionUrlRef.current = nextUrl;
+    pendingConsoleUrlRef.current = nextUrl;
     updateField('defaultServer', endpoint.server);
     updateField('defaultPort', endpoint.port);
     updateField('defaultUseTls', endpoint.useTls);
+    if (consoleSocketRef.current || consoleShouldReconnectRef.current) {
+      setActiveView('console');
+      refreshConsoleConnection({ url: nextUrl, reason: 'Applying new WebSocket URL' });
+      setMessage({ appearance: 'info', text: `Using ${nextUrl} for the refreshed Connect session. Save settings to keep it.` });
+      return;
+    }
     if (tester.nick) setMessage({ appearance: 'info', text: `URL applied to Connect settings. Use ${tester.nick} as your IRC nick, then save settings to keep it.` });
     else setMessage({ appearance: 'confirmation', text: 'WebSocket URL applied to Connect settings. Save settings to keep it.' });
   }
@@ -647,7 +937,7 @@ function App() {
     if (parsed.command === '001') {
       setConsoleRegistered(true);
       addConsoleMessage('Status', 'system', 'server', parsed.params.slice(1).join(' ') || 'Registered with IRC server.');
-      const channels = String(form.defaultChannels)
+      const channels = String(formRef.current.defaultChannels)
         .split(',')
         .map((channel) => channel.trim())
         .filter(Boolean);
@@ -748,7 +1038,8 @@ function App() {
     const nick = (consoleNickInput || bootstrap?.user?.suggestedNick || 'superchat')
       .replace(/[^a-zA-Z0-9_\-[\]]/g, '')
       .slice(0, 20);
-    const url = connectionUrl;
+    const url = options.url || pendingConsoleUrlRef.current || connectionUrlRef.current || connectionUrl;
+    pendingConsoleUrlRef.current = null;
     setConsoleShouldReconnect(true);
     consoleShouldReconnectRef.current = true;
     setConsoleNick(nick);
@@ -762,7 +1053,7 @@ function App() {
     addConsoleMessage('Status', 'system', 'client', `Connecting to ${url} ...`);
 
     try {
-      consoleSocketRef.current = new WebSocket(url, ['irc.a9group.net']);
+      consoleSocketRef.current = new WebSocket(url, IRC_WEBSOCKET_PROTOCOLS);
     } catch (err) {
       consoleSocketRef.current = null;
       setConsoleShouldReconnect(false);
@@ -792,10 +1083,12 @@ function App() {
       setConsoleRegistered(false);
       if (!isUnmountedRef.current && consoleShouldReconnectRef.current) {
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        const delay = manualRefreshRef.current ? 250 : 2500;
+        manualRefreshRef.current = false;
         reconnectTimerRef.current = setTimeout(() => {
           addConsoleMessage('Status', 'system', 'client', 'Refreshing IRC connection...');
           connectConsole({ preserveState: true });
-        }, 2500);
+        }, delay);
       }
     });
 
@@ -812,14 +1105,20 @@ function App() {
     else addConsoleMessage('Status', 'system', 'client', 'Disconnected.');
   }
 
-  function refreshConsoleConnection() {
+  function refreshConsoleConnection(options = {}) {
     setConsoleShouldReconnect(true);
     consoleShouldReconnectRef.current = true;
+    if (options.url) {
+      connectionUrlRef.current = options.url;
+      pendingConsoleUrlRef.current = options.url;
+    }
+    manualRefreshRef.current = true;
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     if (consoleSocketRef.current) {
-      addConsoleMessage('Status', 'system', 'client', 'Refreshing IRC connection...');
+      addConsoleMessage('Status', 'system', 'client', `${options.reason || 'Refreshing IRC connection'}...`);
       consoleSocketRef.current.close();
     } else {
-      connectConsole({ preserveState: true });
+      connectConsole({ preserveState: true, url: options.url });
     }
   }
 
@@ -833,10 +1132,28 @@ function App() {
     }, 300);
   }, [consoleShouldReconnect, isLoading, restoreRequested]);
 
-  function sendConsoleInput() {
-    const text = consoleInput.trim();
+  function resolveConsoleText(rawText) {
+    const expanded = applySmartValues(rawText, {
+      activeConsoleWindow,
+      consoleNick,
+      consoleNickInput,
+      connectionUrl,
+      agentName: agentForm.agentName
+    });
+    const mentions = extractMentions(expanded);
+    return {
+      text: expanded.trim(),
+      mentions
+    };
+  }
+
+  function sendConsoleText(rawText) {
+    const { text, mentions } = resolveConsoleText(rawText);
     if (!text) return;
     setConsoleInput('');
+    if (mentions.length) {
+      addConsoleMessage('Status', 'system', 'client', `Mentioning ${mentions.map((nick) => `@${nick}`).join(', ')} in ${activeConsoleWindow}.`);
+    }
 
     if (text.startsWith('/')) {
       const [commandRaw, ...args] = text.slice(1).split(' ');
@@ -902,10 +1219,38 @@ function App() {
     addConsoleMessage(activeConsoleWindow, 'message', consoleNick, text);
   }
 
+  function sendConsoleInput() {
+    sendConsoleText(consoleInput);
+  }
+
+  function updateConsoleInput(value) {
+    const nextValue = String(value || '');
+    if (/\r?\n$/.test(nextValue)) {
+      sendConsoleText(nextValue.replace(/\r?\n$/, ''));
+      return;
+    }
+    setConsoleInput(nextValue);
+  }
+
   const visibleConsoleMessages = consoleMessages.filter((entry) => entry.target === activeConsoleWindow);
   const consoleTranscript = visibleConsoleMessages.length
     ? visibleConsoleMessages.map((entry) => `[${entry.at}] ${entry.actor ? `${entry.actor}: ` : ''}${entry.text}`).join('\n')
     : 'No messages in this window yet.';
+  const selectedViewIndex = Math.max(0, VIEW_ORDER.indexOf(activeView));
+  const testerProtocolValue = TESTER_PROTOCOL_OPTIONS.find((option) => option.value === tester.wsType) || TESTER_PROTOCOL_OPTIONS[0];
+  const summaryFormatValue = SUMMARY_FORMAT_OPTIONS.find((option) => option.value === agentForm.summaryFormat) || SUMMARY_FORMAT_OPTIONS[0];
+  const agentTemplateOptions = agentAdminSettings.templates.map((template) => ({
+    label: template.name,
+    value: template.key
+  }));
+  const selectedAgentTemplate = agentAdminSettings.templates.find((template) => template.key === agentAdminForm.templateKey) || agentAdminSettings.templates[0] || DEFAULT_AGENT_ADMIN_SETTINGS.templates[0];
+  const selectedAgentTemplateValue = agentTemplateOptions.find((option) => option.value === selectedAgentTemplate.key) || agentTemplateOptions[0];
+  const rovoStudioPrompt = buildRovoStudioPrompt(selectedAgentTemplate, agentAdminForm);
+  const activeNicks = consoleNicks[activeConsoleWindow] || [];
+  const activeUnreadCount = Object.values(consoleUnread).reduce((total, count) => total + Number(count || 0), 0);
+  const activeMentionCount = Object.values(consoleMentions).reduce((total, count) => total + Number(count || 0), 0);
+  const connectedAppearance = consoleConnected ? 'success' : 'default';
+  const registeredAppearance = consoleRegistered ? 'inprogress' : 'default';
 
   if (isLoading) {
     return (
@@ -921,436 +1266,698 @@ function App() {
   return (
     <Box padding="space.300">
       <Stack space="space.300">
-        <Stack space="space.050">
-          <Heading as="h1" size="large">A9 Superchat</Heading>
-          <Text>IRC for Jira, Confluence, and Rovo-assisted incident work.</Text>
-        </Stack>
+        <Box xcss={pageHeaderStyles}>
+          <Inline spread="space-between" alignBlock="center" shouldWrap>
+            <Inline space="space.150" alignBlock="center" shouldWrap>
+              <Icon glyph="rovo-chat" label="" color="color.icon.discovery" />
+              <Stack space="space.025">
+                <Heading as="h1" size="large">A9 Superchat</Heading>
+                <Text>IRC collaboration with Jira, Confluence, and Rovo context.</Text>
+              </Stack>
+            </Inline>
+            <Inline space="space.100" alignBlock="center" shouldWrap>
+              <Lozenge appearance={connectedAppearance}>{consoleConnected ? 'connected' : 'offline'}</Lozenge>
+              <Lozenge appearance={registeredAppearance}>{consoleRegistered ? 'registered' : 'pending'}</Lozenge>
+              {activeUnreadCount ? <Badge appearance="primary">{activeUnreadCount}</Badge> : null}
+              {activeMentionCount ? <Badge appearance="important">{activeMentionCount}</Badge> : null}
+            </Inline>
+          </Inline>
+        </Box>
 
         {message ? (
-          <SectionMessage appearance={message.appearance}>
+          <SectionMessage
+            appearance={message.appearance}
+            actions={[
+              <SectionMessageAction key="dismiss-alert" onClick={() => setMessage(null)}>
+                Dismiss
+              </SectionMessageAction>
+            ]}
+          >
             <Text>{message.text}</Text>
           </SectionMessage>
         ) : null}
 
-        <Inline space="space.100" shouldWrap>
-          <Button appearance={activeView === 'setup' ? 'primary' : 'subtle'} onClick={() => setActiveView('setup')}>
-            Setup
-          </Button>
-          <Button appearance={activeView === 'console' ? 'primary' : 'subtle'} onClick={() => setActiveView('console')}>
-            Connect
-          </Button>
-          <Button appearance={activeView === 'agents' ? 'primary' : 'subtle'} onClick={() => setActiveView('agents')}>
-            Agents
-          </Button>
-          <Button appearance={activeView === 'audit' ? 'primary' : 'subtle'} onClick={() => setActiveView('audit')}>
-            Audit
-          </Button>
-        </Inline>
+        <Tabs
+          id="a9-superchat-views"
+          selected={selectedViewIndex}
+          onChange={(index) => setActiveView(VIEW_ORDER[index] || 'console')}
+        >
+          <TabList>
+            {VIEW_ORDER.map((view) => (
+              <Tab key={view}>{VIEW_LABELS[view]}</Tab>
+            ))}
+          </TabList>
 
-        {activeView === 'console' ? (
-          <Stack space="space.250">
-            <Inline spread="space-between" alignBlock="center" shouldWrap>
-              <Inline space="space.100" alignBlock="center" shouldWrap>
-                <Lozenge appearance={consoleConnected ? 'success' : 'default'}>
-                  {consoleConnected ? 'connected' : 'disconnected'}
-                </Lozenge>
-                <Lozenge appearance={consoleRegistered ? 'inprogress' : 'default'}>
-                  {consoleRegistered ? 'registered' : 'not registered'}
-                </Lozenge>
-                {consoleShouldReconnect ? <Lozenge appearance="information">restore on</Lozenge> : null}
-                <Text>{connectionUrl}</Text>
-              </Inline>
-              <Inline space="space.100" shouldWrap>
-                <Label labelFor="console-nick">Nick</Label>
-                <Textfield
-                  name="console-nick"
-                  id="console-nick"
-                  value={consoleNickInput}
-                  onChange={(event) => setConsoleNickInput(event.target.value)}
-                  isDisabled={consoleConnected}
-                />
-                <Button appearance="primary" onClick={connectConsole} isDisabled={consoleConnected}>
-                  Connect
-                </Button>
-                <Button onClick={disconnectConsole} isDisabled={!consoleConnected}>
-                  Disconnect
-                </Button>
-                <Button onClick={refreshConsoleConnection}>
-                  Refresh
-                </Button>
-                <Button onClick={() => setActiveView('setup')}>Setup</Button>
-              </Inline>
-            </Inline>
-
-            <Inline space="space.200" alignBlock="start">
-              <Stack space="space.100">
-                <Heading as="h2" size="small">Channels</Heading>
-                {consoleWindows.map((windowName) => (
-                  <Button
-                    key={windowName}
-                    appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
-                    onClick={() => switchConsoleWindow(windowName)}
-                  >
-                    {windowName}
-                    {consoleMentions[windowName] ? ` @${consoleMentions[windowName]}` : ''}
-                    {!consoleMentions[windowName] && consoleUnread[windowName] ? ` (${consoleUnread[windowName]})` : ''}
-                  </Button>
-                ))}
-                <Heading as="h2" size="small">Nicks</Heading>
-                {(consoleNicks[activeConsoleWindow] || []).length ? (consoleNicks[activeConsoleWindow] || []).map((nick) => (
-                  <Text key={nick}>{nick}</Text>
-                )) : <Text>No nicks yet.</Text>}
-              </Stack>
-
-              <Stack space="space.150" grow="fill">
+          <TabPanel>
+            <Stack space="space.250">
+              <Box xcss={surfaceStyles}>
                 <Inline spread="space-between" alignBlock="center" shouldWrap>
-                  <Stack space="space.050">
-                    <Heading as="h2" size="medium">{activeConsoleWindow}</Heading>
-                    <Text>{consoleTopics[activeConsoleWindow] || (activeConsoleWindow === 'Status' ? 'Connection status and server messages' : 'No topic set')}</Text>
-                  </Stack>
-                  <Inline space="space.100" shouldWrap>
-                    <Button
-                      onClick={inviteAgentToActiveChannel}
-                      isDisabled={agentBusyAction !== null || !form.allowRovoInvites}
-                    >
-                      Invite agent
-                    </Button>
-                    <Button onClick={askAgentInActiveChannel} isDisabled={agentBusyAction !== null}>
-                      Ask agent
-                    </Button>
-                    <Button onClick={summarizeActiveChannel} isDisabled={agentBusyAction !== null}>
-                      Distill
-                    </Button>
-                    <Button onClick={summonBotWithContext} isDisabled={contextBusy || !consoleConnected || activeConsoleWindow === 'Status'}>
-                      {contextBusy ? 'Summoning...' : 'Summon A9SysOp'}
-                    </Button>
+                  <Inline space="space.100" alignBlock="center" shouldWrap>
+                    <TagGroup>
+                      <Tag text={connectionUrl} color="blue-light" />
+                      {consoleShouldReconnect ? <Tag text="restore on" color="teal-light" /> : null}
+                    </TagGroup>
+                  </Inline>
+                  <Inline space="space.100" alignBlock="center" shouldWrap>
+                    <Label labelFor="console-nick">Nick</Label>
+                    <Textfield
+                      name="console-nick"
+                      id="console-nick"
+                      value={consoleNickInput}
+                      onChange={(event) => setConsoleNickInput(event.target.value)}
+                      isDisabled={consoleConnected}
+                    />
+                    <ButtonGroup label="Connection actions">
+                      <Button appearance="primary" iconBefore="link" onClick={connectConsole} isDisabled={consoleConnected}>
+                        Connect
+                      </Button>
+                      <Button iconBefore="sign-out" onClick={disconnectConsole} isDisabled={!consoleConnected}>
+                        Disconnect
+                      </Button>
+                      <Tooltip content="Reconnect while keeping channel state">
+                        <Button iconBefore="refresh" onClick={() => refreshConsoleConnection()}>
+                          Refresh
+                        </Button>
+                      </Tooltip>
+                    </ButtonGroup>
                   </Inline>
                 </Inline>
-                <CodeBlock language="text" text={consoleTranscript} />
+              </Box>
 
-                <Inline space="space.100" alignBlock="center">
-                  <Textfield
-                    name="console-input"
-                    id="console-input"
-                    value={consoleInput}
-                    placeholder={activeConsoleWindow === 'Status' ? '/join #channel or /raw VERSION' : `Message ${activeConsoleWindow}`}
-                    onChange={(event) => setConsoleInput(event.target.value)}
-                  />
-                  <Button
-                    appearance="primary"
-                    iconBefore="send"
-                    onClick={sendConsoleInput}
-                    isDisabled={!consoleConnected}
-                  >
-                    Send
-                  </Button>
+              <Inline space="space.200" alignBlock="start">
+                <Box xcss={sidebarStyles}>
+                  <Stack space="space.200">
+                    <Stack space="space.100">
+                      <Heading as="h2" size="small">Windows</Heading>
+                      {consoleWindows.map((windowName) => (
+                        <Button
+                          key={windowName}
+                          appearance={activeConsoleWindow === windowName ? 'primary' : 'subtle'}
+                          shouldFitContainer
+                          onClick={() => switchConsoleWindow(windowName)}
+                        >
+                          {windowName}
+                          {consoleMentions[windowName] ? ` @${consoleMentions[windowName]}` : ''}
+                          {!consoleMentions[windowName] && consoleUnread[windowName] ? ` (${consoleUnread[windowName]})` : ''}
+                        </Button>
+                      ))}
+                    </Stack>
+                    <Stack space="space.100">
+                      <Inline spread="space-between" alignBlock="center">
+                        <Heading as="h2" size="small">People</Heading>
+                        <Badge>{activeNicks.length}</Badge>
+                      </Inline>
+                      {activeNicks.length ? activeNicks.map((nick) => (
+                        <Inline key={nick} space="space.050" alignBlock="center">
+                          <Icon glyph="person" label="" size="small" />
+                          <Text>{nick}</Text>
+                        </Inline>
+                      )) : <Text>No nicks yet.</Text>}
+                    </Stack>
+                  </Stack>
+                </Box>
+
+                <Stack space="space.150" grow="fill">
+                  <Box xcss={surfaceStyles}>
+                    <Inline spread="space-between" alignBlock="start" shouldWrap>
+                      <Stack space="space.050">
+                        <Heading as="h2" size="medium">{activeConsoleWindow}</Heading>
+                        <Text>{consoleTopics[activeConsoleWindow] || (activeConsoleWindow === 'Status' ? 'Connection status and server messages' : 'No topic set')}</Text>
+                      </Stack>
+                      <ButtonGroup label="Channel actions">
+                        <Button
+                          iconBefore="person-add"
+                          onClick={inviteAgentToActiveChannel}
+                          isDisabled={agentBusyAction !== null || !form.allowRovoInvites}
+                        >
+                          Invite
+                        </Button>
+                        <Button iconBefore="question-circle" onClick={askAgentInActiveChannel} isDisabled={agentBusyAction !== null}>
+                          Ask
+                        </Button>
+                        <Button iconBefore="ai-generative-text-summary" onClick={summarizeActiveChannel} isDisabled={agentBusyAction !== null}>
+                          Distill
+                        </Button>
+                        <Button iconBefore="ai-agent" onClick={summonBotWithContext} isDisabled={contextBusy || !consoleConnected || activeConsoleWindow === 'Status'}>
+                          {contextBusy ? 'Summoning...' : 'A9SysOp'}
+                        </Button>
+                      </ButtonGroup>
+                    </Inline>
+                  </Box>
+
+                  <Box xcss={scrollbackBoxStyles} padding="space.100">
+                    {visibleConsoleMessages.length ? (
+                      <CodeBlock language="text" text={consoleTranscript} />
+                    ) : (
+                      <EmptyState
+                        header="No messages yet"
+                        description={activeConsoleWindow === 'Status' ? 'Connect to an IRC WebSocket endpoint to see server status here.' : `Messages for ${activeConsoleWindow} will appear here.`}
+                        primaryAction={<Button appearance="primary" onClick={connectConsole} isDisabled={consoleConnected}>Connect</Button>}
+                      />
+                    )}
+                  </Box>
+
+                  <Form onSubmit={sendConsoleInput}>
+                    <Inline space="space.100" alignBlock="center">
+                      <Box xcss={composerInputStyles}>
+                        <TextArea
+                          name="console-input"
+                          id="console-input"
+                          value={consoleInput}
+                          minimumRows={2}
+                          maxHeight="96px"
+                          resize="none"
+                          placeholder={activeConsoleWindow === 'Status' ? '/join #channel, /raw VERSION, or {{time}} status' : `Message ${activeConsoleWindow} with @nick or {{channel}}`}
+                          onChange={(event) => updateConsoleInput(event.target.value)}
+                        />
+                      </Box>
+                      <Button
+                        appearance="primary"
+                        iconBefore="send"
+                        type="submit"
+                        isDisabled={!consoleConnected}
+                      >
+                        Send
+                      </Button>
+                    </Inline>
+                  </Form>
+                  <Inline space="space.100" alignBlock="center" shouldWrap>
+                    <Tag text="@nick mentions" color="purple-light" />
+                    <Tag text="{{channel}}" color="blue-light" />
+                    <Tag text="{{nick}}" color="blue-light" />
+                    <Tag text="{{time}}" color="blue-light" />
+                    <Tag text="{{date}}" color="blue-light" />
+                    <Text>Enter sends. Unknown smart values are left unchanged.</Text>
+                  </Inline>
+
+                  <Inline space="space.100" alignBlock="center" shouldWrap>
+                    <Button iconBefore="add" onClick={() => {
+                      setConsoleInput(`/join ${String(form.defaultChannels).split(',')[0]?.trim() || '#a9superchat'}`);
+                    }}>
+                      Join default
+                    </Button>
+                    <Button iconBefore="angle-brackets" onClick={() => setConsoleInput('/raw ')}>
+                      Raw
+                    </Button>
+                    <Button iconBefore="trash" onClick={clearStatusHistory}>
+                      Clear status
+                    </Button>
+                    <Text>/join, /part, /msg, /me, /topic, /names, /whois, /invite, /raw, /quote</Text>
+                  </Inline>
+                </Stack>
+              </Inline>
+            </Stack>
+          </TabPanel>
+
+          <TabPanel>
+            <Stack space="space.250">
+              <Box xcss={surfaceStyles}>
+                <FormHeader title="Admin setup" description="Manage the shared IRC endpoint, connection defaults, and agent bootstrap path." />
+                <Inline space="space.200" alignBlock="start">
+                  <Stack space="space.150" grow="fill">
+                    <FormSection title="WebSocket tester">
+                      <Inline space="space.100" shouldWrap>
+                        <Button onClick={() => {
+                          updateTesterField('url', 'wss://irc.a9group.net');
+                          updateTesterField('wsType', 'text');
+                        }}>
+                          A9 InspIRCd
+                        </Button>
+                        <Button onClick={() => {
+                          updateTesterField('url', 'wss://testnet.ergo.chat/webirc');
+                          updateTesterField('wsType', 'text');
+                        }}>
+                          Ergo
+                        </Button>
+                        <Button onClick={() => {
+                          updateTesterField('url', 'wss://testnet.inspircd.org:8097');
+                          updateTesterField('wsType', 'text');
+                        }}>
+                          InspIRCd
+                        </Button>
+                        <Button onClick={() => {
+                          updateTesterField('url', 'wss://irc.unrealircd.org:8000');
+                          updateTesterField('wsType', 'text');
+                        }}>
+                          UnrealIRCd
+                        </Button>
+                      </Inline>
+
+                      <Label labelFor="tester-url">WebSocket URL</Label>
+                      <Textfield
+                        name="tester-url"
+                        id="tester-url"
+                        value={tester.url}
+                        onChange={(event) => updateTesterField('url', event.target.value)}
+                      />
+                      <HelperMessage>Use a browser WebSocket endpoint such as wss://irc.a9group.net, not a raw IRC port.</HelperMessage>
+
+                      <Label labelFor="tester-nick">Nickname</Label>
+                      <Textfield
+                        name="tester-nick"
+                        id="tester-nick"
+                        value={tester.nick}
+                        onChange={(event) => updateTesterField('nick', event.target.value)}
+                      />
+
+                      <Label labelFor="tester-protocol">Protocol mode</Label>
+                      <Select
+                        inputId="tester-protocol"
+                        value={testerProtocolValue}
+                        options={TESTER_PROTOCOL_OPTIONS}
+                        onChange={(option) => updateTesterField('wsType', option?.value || 'text')}
+                      />
+
+                      <Inline space="space.100" shouldWrap>
+                        <Button appearance="primary" iconBefore="link" onClick={connectTester} isDisabled={testerConnected}>
+                          Connect
+                        </Button>
+                        <Button iconBefore="sign-out" onClick={disconnectTester} isDisabled={!testerConnected}>
+                          Disconnect
+                        </Button>
+                        <Button iconBefore="check" onClick={useTesterUrl}>Use for Connect</Button>
+                      </Inline>
+
+                      <Inline space="space.200" shouldWrap>
+                        <Checkbox
+                          name="tester-follow"
+                          value="tester-follow"
+                          label="Follow new lines"
+                          isChecked={tester.follow}
+                          onChange={(event) => updateTesterField('follow', event.target.checked)}
+                        />
+                        <Checkbox
+                          name="tester-pongs"
+                          value="tester-pongs"
+                          label="Respond to PINGs"
+                          isChecked={tester.respondToPings}
+                          onChange={(event) => updateTesterField('respondToPings', event.target.checked)}
+                        />
+                      </Inline>
+
+                      <Label labelFor="tester-line">Send raw IRC line</Label>
+                      <Inline space="space.100" alignBlock="center">
+                        <Textfield
+                          name="tester-line"
+                          id="tester-line"
+                          value={tester.rawLine}
+                          onChange={(event) => updateTesterField('rawLine', event.target.value)}
+                        />
+                        <Button iconBefore="send" onClick={sendTesterInput} isDisabled={!testerConnected}>Send</Button>
+                      </Inline>
+                    </FormSection>
+                  </Stack>
+
+                  <Stack space="space.150" grow="fill">
+                    <FormSection title="Connect settings">
+                      <TagGroup>
+                        <Tag text={connectionUrl} color="blue-light" />
+                        <Tag text={bootstrap?.user?.suggestedNick || 'superchat'} color="teal-light" />
+                      </TagGroup>
+                      <Label labelFor="default-server">IRC server</Label>
+                      <Textfield
+                        name="default-server"
+                        id="default-server"
+                        value={form.defaultServer}
+                        onChange={(event) => updateField('defaultServer', event.target.value)}
+                      />
+                      <Label labelFor="default-port">WebSocket port</Label>
+                      <Textfield
+                        name="default-port"
+                        id="default-port"
+                        value={String(form.defaultPort)}
+                        onChange={(event) => updateField('defaultPort', event.target.value)}
+                      />
+                      <Label labelFor="default-channels">Default channels</Label>
+                      <Textfield
+                        name="default-channels"
+                        id="default-channels"
+                        value={form.defaultChannels}
+                        onChange={(event) => updateField('defaultChannels', event.target.value)}
+                      />
+                      <Label labelFor="relay-url">Relay URL</Label>
+                      <Textfield
+                        name="relay-url"
+                        id="relay-url"
+                        value={form.relayUrl}
+                        placeholder="wss://relay.example.com"
+                        onChange={(event) => updateField('relayUrl', event.target.value)}
+                      />
+                      <Label labelFor="retention-days">Transcript retention days</Label>
+                      <Textfield
+                        name="retention-days"
+                        id="retention-days"
+                        value={String(form.transcriptRetentionDays)}
+                        onChange={(event) => updateField('transcriptRetentionDays', event.target.value)}
+                      />
+                      <Checkbox
+                        name="default-use-tls"
+                        value="default-use-tls"
+                        label="Use TLS / WSS"
+                        isChecked={form.defaultUseTls}
+                        onChange={(event) => updateField('defaultUseTls', event.target.checked)}
+                      />
+                      <Checkbox
+                        name="auto-connect"
+                        value="auto-connect"
+                        label="Open Connect and reconnect automatically"
+                        isChecked={form.autoConnect}
+                        onChange={(event) => updateField('autoConnect', event.target.checked)}
+                      />
+                      <Checkbox
+                        name="allow-rovo-invites"
+                        value="allow-rovo-invites"
+                        label="Allow Rovo agent channel invites"
+                        isChecked={form.allowRovoInvites}
+                        onChange={(event) => updateField('allowRovoInvites', event.target.checked)}
+                      />
+                      <Checkbox
+                        name="allow-dcc-proxy"
+                        value="allow-dcc-proxy"
+                        label="Allow DCC-style relay file sharing"
+                        isChecked={form.allowDccProxy}
+                        onChange={(event) => updateField('allowDccProxy', event.target.checked)}
+                      />
+                      <FormFooter>
+                        <Button appearance="primary" iconBefore="check" onClick={saveSettings} isDisabled={isSaving}>
+                          {isSaving ? 'Saving...' : 'Save settings'}
+                        </Button>
+                        <Button iconBefore="chat-widget" onClick={() => setActiveView('console')}>Open Connect</Button>
+                      </FormFooter>
+                    </FormSection>
+                  </Stack>
                 </Inline>
-              </Stack>
-            </Inline>
+              </Box>
 
-            <Inline space="space.100" shouldWrap>
-              <Button onClick={() => {
-                setConsoleInput(`/join ${String(form.defaultChannels).split(',')[0]?.trim() || '#a9superchat'}`);
-              }}>
-                Join default
-              </Button>
-              <Button onClick={() => setConsoleInput('/raw ')}>
-                Raw
-              </Button>
-              <Text>Commands: /join, /part, /msg, /me, /topic, /names, /whois, /invite, /raw, /quote.</Text>
-            </Inline>
-          </Stack>
-        ) : null}
-
-        {activeView === 'setup' ? (
-          <Stack space="space.250">
-            <Stack space="space.150">
-              <Heading as="h2" size="medium">WebSocket tester</Heading>
-              <Text>Validate an IRC WebSocket endpoint before opening the live console.</Text>
-              <SectionMessage appearance="info" title="Promote a working endpoint">
-                <Text>
-                  Test the server here first. When the connection works, use the highlighted button to copy the URL
-                  into Connect settings, then save if you want it to load next time.
-                </Text>
-              </SectionMessage>
-              <Inline space="space.100" shouldWrap>
-                <Button onClick={() => {
-                  updateTesterField('url', 'wss://irc.a9group.net');
-                  updateTesterField('wsType', 'text');
-                }}>
-                  A9 InspIRCd
-                </Button>
-                <Button onClick={() => {
-                  updateTesterField('url', 'wss://testnet.ergo.chat/webirc');
-                  updateTesterField('wsType', 'text');
-                }}>
-                  Ergo
-                </Button>
-                <Button onClick={() => {
-                  updateTesterField('url', 'wss://testnet.inspircd.org:8097');
-                  updateTesterField('wsType', 'binary');
-                }}>
-                  InspIRCd
-                </Button>
-                <Button onClick={() => {
-                  updateTesterField('url', 'wss://irc.unrealircd.org:8000');
-                  updateTesterField('wsType', 'text');
-                }}>
-                  UnrealIRCd
-                </Button>
+              <Inline space="space.200" alignBlock="start">
+                <Box xcss={subtleSurfaceStyles}>
+                  <Stack space="space.100">
+                    <Heading as="h3" size="small">Example code</Heading>
+                    <CodeBlock language="javascript" text={testerCode} />
+                  </Stack>
+                </Box>
+                <Box xcss={subtleSurfaceStyles}>
+                  <Stack space="space.100">
+                    <Heading as="h3" size="small">Tester log</Heading>
+                    <Box xcss={scrollbackBoxStyles} padding="space.100">
+                      <CodeBlock language="text" text={testerLog} />
+                    </Box>
+                  </Stack>
+                </Box>
               </Inline>
 
-              <Label labelFor="tester-url">WebSocket URL</Label>
-              <Textfield
-                name="tester-url"
-                id="tester-url"
-                value={tester.url}
-                onChange={(event) => updateTesterField('url', event.target.value)}
-              />
-              <Label labelFor="tester-nick">Nickname</Label>
-              <Textfield
-                name="tester-nick"
-                id="tester-nick"
-                value={tester.nick}
-                onChange={(event) => updateTesterField('nick', event.target.value)}
-              />
+              <Box xcss={surfaceStyles}>
+                <FormHeader
+                  title="Agent bootstrap"
+                  description="Manage default Rovo agents for IRC channels and prepare templates for Rovo Studio."
+                />
+                <Inline space="space.200" alignBlock="start">
+                  <Stack space="space.150" grow="fill">
+                    <FormSection
+                      title="Default channel agents"
+                      description="These mappings define which Rovo agent should be invited or recommended for each IRC channel by default."
+                    >
+                      {agentAdminSettings.defaultAssignments.length ? (
+                        <Stack space="space.100">
+                          {agentAdminSettings.defaultAssignments.map((assignment) => {
+                            const template = agentAdminSettings.templates.find((item) => item.key === assignment.templateKey);
+                            return (
+                              <Box key={`${assignment.channel}-${assignment.agentName}`} xcss={subtleSurfaceStyles}>
+                                <Inline spread="space-between" alignBlock="center" shouldWrap>
+                                  <Stack space="space.025">
+                                    <Inline space="space.100" alignBlock="center" shouldWrap>
+                                      <Tag text={assignment.channel} color="blue-light" />
+                                      <Text>{assignment.agentName}</Text>
+                                    </Inline>
+                                    <Text>{template?.name || assignment.templateKey}</Text>
+                                  </Stack>
+                                  <Button iconBefore="trash" onClick={() => removeDefaultAgentAssignment(assignment.channel)}>
+                                    Remove
+                                  </Button>
+                                </Inline>
+                              </Box>
+                            );
+                          })}
+                        </Stack>
+                      ) : (
+                        <EmptyState
+                          header="No default agents"
+                          description="Add a channel mapping so admins have a repeatable bootstrap path."
+                        />
+                      )}
+                    </FormSection>
 
-              <Inline space="space.100" shouldWrap>
-                <Button appearance={tester.wsType === 'text' ? 'primary' : 'subtle'} onClick={() => updateTesterField('wsType', 'text')}>
-                  Text WS
-                </Button>
-                <Button appearance={tester.wsType === 'binary' ? 'primary' : 'subtle'} onClick={() => updateTesterField('wsType', 'binary')}>
-                  Binary WS
-                </Button>
-                <Button appearance={tester.wsType === 'none' ? 'primary' : 'subtle'} onClick={() => updateTesterField('wsType', 'none')}>
-                  EmptyProtocol WS
-                </Button>
-              </Inline>
+                    <FormSection title="Add or replace a channel mapping">
+                      <Label labelFor="admin-agent-channel">IRC channel</Label>
+                      <Textfield
+                        name="admin-agent-channel"
+                        id="admin-agent-channel"
+                        value={agentAdminForm.channel}
+                        onChange={(event) => updateAgentAdminField('channel', event.target.value)}
+                      />
+                      <Label labelFor="admin-agent-name">Agent name</Label>
+                      <Textfield
+                        name="admin-agent-name"
+                        id="admin-agent-name"
+                        value={agentAdminForm.agentName}
+                        onChange={(event) => updateAgentAdminField('agentName', event.target.value)}
+                      />
+                      <Label labelFor="admin-agent-template">Template</Label>
+                      <Select
+                        inputId="admin-agent-template"
+                        value={selectedAgentTemplateValue}
+                        options={agentTemplateOptions}
+                        onChange={(option) => selectAgentTemplate(option?.value || selectedAgentTemplate.key)}
+                      />
+                      <ButtonGroup label="Default agent actions">
+                        <Button appearance="primary" iconBefore="add" onClick={addDefaultAgentAssignment}>
+                          Stage default
+                        </Button>
+                        <Button iconBefore="check" onClick={saveAgentAdminSettings} isDisabled={isSavingAgentAdmin}>
+                          {isSavingAgentAdmin ? 'Saving...' : 'Save admin settings'}
+                        </Button>
+                      </ButtonGroup>
+                    </FormSection>
+                  </Stack>
 
-              <Inline space="space.100" shouldWrap>
-                <Button onClick={connectTester} isDisabled={testerConnected}>
-                  Connect
-                </Button>
-                <Button onClick={disconnectTester} isDisabled={!testerConnected}>
-                  Disconnect
-                </Button>
-                <Button appearance="primary" onClick={useTesterUrl}>Use URL for Connect</Button>
-              </Inline>
+                  <Stack space="space.150" grow="fill">
+                    <FormSection
+                      title="Create in Rovo Studio"
+                      description="Use this generated brief when creating or updating an IRC-capable Rovo agent."
+                    >
+                      <SectionMessage appearance="info" title="Rovo Studio handoff">
+                        <Text>
+                          Create a Rovo agent, add the listed A9 Superchat actions, paste the instructions below,
+                          then return here and map that agent name to the target IRC channel.
+                        </Text>
+                      </SectionMessage>
+                      <Label labelFor="rovo-studio-url">Rovo Studio URL</Label>
+                      <Textfield
+                        name="rovo-studio-url"
+                        id="rovo-studio-url"
+                        value={agentAdminSettings.rovoStudioUrl}
+                        onChange={(event) => setAgentAdminSettings((current) => ({ ...current, rovoStudioUrl: event.target.value }))}
+                      />
+                      <Label labelFor="rovo-agent-brief">Generated agent brief</Label>
+                      <TextArea
+                        name="rovo-agent-brief"
+                        id="rovo-agent-brief"
+                        value={rovoStudioPrompt}
+                        isReadOnly
+                        isMonospaced
+                        minimumRows={14}
+                      />
+                      <Heading as="h3" size="small">Required actions</Heading>
+                      <TagGroup>
+                        {(selectedAgentTemplate.actions || []).map((action) => (
+                          <Tag key={action} text={action} color="purple-light" />
+                        ))}
+                      </TagGroup>
+                      <Button iconBefore="open" onClick={() => setMessage({ appearance: 'info', text: `Open Rovo Studio at ${agentAdminSettings.rovoStudioUrl} and create ${agentAdminForm.agentName}.` })}>
+                        Show Rovo Studio path
+                      </Button>
+                    </FormSection>
 
-              <Checkbox
-                name="tester-follow"
-                value="tester-follow"
-                label="Follow new lines"
-                isChecked={tester.follow}
-                onChange={(event) => updateTesterField('follow', event.target.checked)}
-              />
-              <Checkbox
-                name="tester-pongs"
-                value="tester-pongs"
-                label="Respond to PINGs"
-                isChecked={tester.respondToPings}
-                onChange={(event) => updateTesterField('respondToPings', event.target.checked)}
-              />
+                    <FormSection title="Template guidance">
+                      <Text>{selectedAgentTemplate.description}</Text>
+                      <CodeBlock language="text" text={selectedAgentTemplate.instructions || ''} />
+                    </FormSection>
+                  </Stack>
+                </Inline>
+              </Box>
 
-              <Label labelFor="tester-line">Send raw IRC line</Label>
-              <Textfield
-                name="tester-line"
-                id="tester-line"
-                value={tester.rawLine}
-                onChange={(event) => updateTesterField('rawLine', event.target.value)}
-              />
-              <Button onClick={sendTesterInput} isDisabled={!testerConnected}>Send line</Button>
-
-              <Heading as="h3" size="small">Example WebSocket code</Heading>
-              <CodeBlock language="javascript" text={testerCode} />
-              <Heading as="h3" size="small">Log</Heading>
-              <CodeBlock language="text" text={testerLog} />
-            </Stack>
-
-            <Inline space="space.200" alignBlock="center" shouldWrap>
-              <Lozenge appearance="information">{bootstrap?.user?.source || 'identity'}</Lozenge>
-              <Text>{bootstrap?.user?.displayName || 'A9 Superchat User'}</Text>
-              <Text>Suggested IRC nick: {bootstrap?.user?.suggestedNick || 'superchat'}</Text>
-            </Inline>
-
-            <SectionMessage appearance="warning">
-              <Text>
-                Direct browser WebSocket hosts must be declared in Forge client egress. Add each IRC WSS origin to the manifest before deployment.
-              </Text>
-            </SectionMessage>
-
-            <Stack space="space.150">
-              <Heading as="h2" size="medium">Connect settings</Heading>
-              <Text>Default WSS URL: {connectionUrl}</Text>
-              <Label labelFor="default-server">IRC server</Label>
-              <Textfield
-                name="default-server"
-                id="default-server"
-                value={form.defaultServer}
-                onChange={(event) => updateField('defaultServer', event.target.value)}
-              />
-              <Label labelFor="default-port">WebSocket port</Label>
-              <Textfield
-                name="default-port"
-                id="default-port"
-                value={String(form.defaultPort)}
-                onChange={(event) => updateField('defaultPort', event.target.value)}
-              />
-              <Label labelFor="default-channels">Default channels</Label>
-              <Textfield
-                name="default-channels"
-                id="default-channels"
-                value={form.defaultChannels}
-                onChange={(event) => updateField('defaultChannels', event.target.value)}
-              />
-              <Label labelFor="relay-url">Relay URL</Label>
-              <Textfield
-                name="relay-url"
-                id="relay-url"
-                value={form.relayUrl}
-                placeholder="wss://relay.example.com"
-                onChange={(event) => updateField('relayUrl', event.target.value)}
-              />
-              <Label labelFor="retention-days">Transcript retention days</Label>
-              <Textfield
-                name="retention-days"
-                id="retention-days"
-                value={String(form.transcriptRetentionDays)}
-                onChange={(event) => updateField('transcriptRetentionDays', event.target.value)}
-              />
-              <Checkbox
-                name="default-use-tls"
-                value="default-use-tls"
-                label="Use TLS / WSS"
-                isChecked={form.defaultUseTls}
-                onChange={(event) => updateField('defaultUseTls', event.target.checked)}
-              />
-              <Checkbox
-                name="auto-connect"
-                value="auto-connect"
-                label="Open Connect and reconnect automatically when this config is available"
-                isChecked={form.autoConnect}
-                onChange={(event) => updateField('autoConnect', event.target.checked)}
-              />
-              <Checkbox
-                name="allow-rovo-invites"
-                value="allow-rovo-invites"
-                label="Allow Rovo agent channel invites"
-                isChecked={form.allowRovoInvites}
-                onChange={(event) => updateField('allowRovoInvites', event.target.checked)}
-              />
-              <Checkbox
-                name="allow-dcc-proxy"
-                value="allow-dcc-proxy"
-                label="Allow DCC-style relay file sharing"
-                isChecked={form.allowDccProxy}
-                onChange={(event) => updateField('allowDccProxy', event.target.checked)}
-              />
-              <Inline space="space.100" shouldWrap>
-                <Button appearance="primary" onClick={saveSettings} isDisabled={isSaving}>
-                  {isSaving ? 'Saving...' : 'Save settings'}
-                </Button>
-                <Button onClick={() => setActiveView('console')}>Open Connect</Button>
-              </Inline>
-            </Stack>
-          </Stack>
-        ) : null}
-
-        {activeView === 'agents' ? (
-          <Stack space="space.250">
-            <Heading as="h2" size="medium">Rovo and IRC agents</Heading>
-            <Text>
-              Invite a Rovo agent into an IRC channel, ask a triage question, or queue a channel summary from retained
-              transcript events.
-            </Text>
-            {!form.allowRovoInvites ? (
               <SectionMessage appearance="warning">
-                <Text>Rovo channel invites are disabled in Setup. Enable them before inviting agents.</Text>
+                <Text>Direct browser WebSocket hosts must be declared in Forge client egress before deployment.</Text>
               </SectionMessage>
-            ) : null}
-
-            <Stack space="space.150">
-              <Label labelFor="agent-name">Agent</Label>
-              <Textfield
-                name="agent-name"
-                id="agent-name"
-                value={agentForm.agentName}
-                onChange={(event) => updateAgentField('agentName', event.target.value)}
-              />
-              <Label labelFor="agent-channel">IRC channel</Label>
-              <Textfield
-                name="agent-channel"
-                id="agent-channel"
-                value={agentForm.channel}
-                onChange={(event) => updateAgentField('channel', event.target.value)}
-              />
-              <Inline space="space.100" shouldWrap>
-                <Button
-                  appearance="primary"
-                  onClick={inviteAgent}
-                  isDisabled={agentBusyAction !== null || !form.allowRovoInvites}
-                >
-                  {agentBusyAction === 'inviteAgentToChannel' ? 'Inviting...' : 'Invite agent'}
-                </Button>
-                <Button onClick={() => setActiveView('console')}>Open console</Button>
-                <Button onClick={summonBotWithContext} isDisabled={contextBusy || !consoleConnected}>
-                  {contextBusy ? 'Summoning...' : 'Summon with context'}
-                </Button>
-              </Inline>
             </Stack>
+          </TabPanel>
 
-            <Stack space="space.150">
-              <Heading as="h3" size="small">Ask for triage</Heading>
-              <Label labelFor="agent-issue-key">Jira issue key</Label>
-              <Textfield
-                name="agent-issue-key"
-                id="agent-issue-key"
-                placeholder="CS-123"
-                value={agentForm.issueKey}
-                onChange={(event) => updateAgentField('issueKey', event.target.value)}
-              />
-              <Label labelFor="agent-question">Question</Label>
-              <Textfield
-                name="agent-question"
-                id="agent-question"
-                value={agentForm.question}
-                onChange={(event) => updateAgentField('question', event.target.value)}
-              />
-              <Button appearance="primary" onClick={askAgent} isDisabled={agentBusyAction !== null}>
-                {agentBusyAction === 'askAgentInChannel' ? 'Asking...' : 'Ask channel'}
-              </Button>
+          <TabPanel>
+            <Stack space="space.250">
+              <Box xcss={surfaceStyles}>
+                <FormHeader title="Rovo and IRC agents" description="Queue agent invites, Jira-grounded questions, and channel summaries from the current IRC context." />
+                {!form.allowRovoInvites ? (
+                  <SectionMessage
+                    appearance="warning"
+                    actions={[
+                      <SectionMessageAction key="dismiss-rovo-disabled" onClick={() => updateField('allowRovoInvites', true)}>
+                        Enable
+                      </SectionMessageAction>
+                    ]}
+                  >
+                    <Text>Rovo channel invites are disabled in Admin.</Text>
+                  </SectionMessage>
+                ) : null}
+
+                <Inline space="space.200" alignBlock="start">
+                  <Stack space="space.150" grow="fill">
+                    <FormSection title="Channel presence">
+                      <Label labelFor="agent-name">Agent</Label>
+                      <Textfield
+                        name="agent-name"
+                        id="agent-name"
+                        value={agentForm.agentName}
+                        onChange={(event) => updateAgentField('agentName', event.target.value)}
+                      />
+                      <Label labelFor="agent-channel">IRC channel</Label>
+                      <Textfield
+                        name="agent-channel"
+                        id="agent-channel"
+                        value={agentForm.channel}
+                        onChange={(event) => updateAgentField('channel', event.target.value)}
+                      />
+                      <ButtonGroup label="Agent presence actions">
+                        <Button
+                          appearance="primary"
+                          iconBefore="person-add"
+                          onClick={inviteAgent}
+                          isDisabled={agentBusyAction !== null || !form.allowRovoInvites}
+                        >
+                          {agentBusyAction === 'inviteAgentToChannel' ? 'Inviting...' : 'Invite'}
+                        </Button>
+                        <Button iconBefore="chat-widget" onClick={() => setActiveView('console')}>Open console</Button>
+                        <Button iconBefore="ai-agent" onClick={summonBotWithContext} isDisabled={contextBusy || !consoleConnected}>
+                          {contextBusy ? 'Summoning...' : 'Summon context'}
+                        </Button>
+                      </ButtonGroup>
+                    </FormSection>
+
+                    <FormSection title="Ask for triage">
+                      <Label labelFor="agent-issue-key">Jira issue key</Label>
+                      <Textfield
+                        name="agent-issue-key"
+                        id="agent-issue-key"
+                        placeholder="CS-123"
+                        value={agentForm.issueKey}
+                        onChange={(event) => updateAgentField('issueKey', event.target.value)}
+                      />
+                      <Label labelFor="agent-question">Question</Label>
+                      <Textfield
+                        name="agent-question"
+                        id="agent-question"
+                        value={agentForm.question}
+                        onChange={(event) => updateAgentField('question', event.target.value)}
+                      />
+                      <Button appearance="primary" iconBefore="question-circle" onClick={askAgent} isDisabled={agentBusyAction !== null}>
+                        {agentBusyAction === 'askAgentInChannel' ? 'Asking...' : 'Ask channel'}
+                      </Button>
+                    </FormSection>
+                  </Stack>
+
+                  <Stack space="space.150" grow="fill">
+                    <FormSection title="Distill channel">
+                      <Label labelFor="summary-format">Summary format</Label>
+                      <Select
+                        inputId="summary-format"
+                        value={summaryFormatValue}
+                        options={SUMMARY_FORMAT_OPTIONS}
+                        onChange={(option) => updateAgentField('summaryFormat', option?.value || 'rca')}
+                      />
+                      <Button appearance="primary" iconBefore="ai-generative-text-summary" onClick={summarizeChannel} isDisabled={agentBusyAction !== null}>
+                        {agentBusyAction === 'summarizeChannel' ? 'Queueing...' : 'Queue summary'}
+                      </Button>
+                    </FormSection>
+
+                    <FormSection title="Agent message queue">
+                      <Inline space="space.100" alignBlock="center" shouldWrap>
+                        <Button iconBefore="refresh" onClick={refreshAgentQueue}>Refresh queue</Button>
+                        <Badge>{agentQueue.length}</Badge>
+                      </Inline>
+                      {agentQueue.length ? (
+                        <Stack space="space.100">
+                          {agentQueue.slice(0, 8).map((item) => (
+                            <Box key={item.id} xcss={subtleSurfaceStyles}>
+                              <Stack space="space.050">
+                                <Inline space="space.100" alignBlock="center" shouldWrap>
+                                  <Tag text={item.channel} color="blue-light" />
+                                  <Tag text={item.type} color="purple-light" />
+                                  <Lozenge appearance={item.status === 'queued' ? 'inprogress' : 'default'}>{item.status}</Lozenge>
+                                </Inline>
+                                <Text>{item.text || item.agentName || item.actor}</Text>
+                                <Text>{item.createdAt}</Text>
+                              </Stack>
+                            </Box>
+                          ))}
+                        </Stack>
+                      ) : (
+                        <EmptyState
+                          header="No queued agent messages"
+                          description="Queued invites, triage messages, and summaries will appear here."
+                        />
+                      )}
+                    </FormSection>
+
+                    {agentResult ? (
+                      <SectionMessage appearance="info" title="Last queued action">
+                        <CodeBlock language="json" text={JSON.stringify(agentResult, null, 2)} />
+                      </SectionMessage>
+                    ) : (
+                      <EmptyState
+                        header="No agent work queued"
+                        description="Invite an agent, ask a triage question, or queue a channel summary."
+                        primaryAction={<Button appearance="primary" iconBefore="person-add" onClick={inviteAgent} isDisabled={agentBusyAction !== null || !form.allowRovoInvites}>Invite agent</Button>}
+                      />
+                    )}
+                  </Stack>
+                </Inline>
+              </Box>
             </Stack>
+          </TabPanel>
 
-            <Stack space="space.150">
-              <Heading as="h3" size="small">Distill channel</Heading>
-              <Label labelFor="summary-format">Summary format</Label>
-              <Textfield
-                name="summary-format"
-                id="summary-format"
-                value={agentForm.summaryFormat}
-                onChange={(event) => updateAgentField('summaryFormat', event.target.value)}
-              />
-              <Button appearance="primary" onClick={summarizeChannel} isDisabled={agentBusyAction !== null}>
-                {agentBusyAction === 'summarizeChannel' ? 'Queueing...' : 'Queue summary'}
-              </Button>
+          <TabPanel>
+            <Stack space="space.200">
+              <Box xcss={surfaceStyles}>
+                <FormHeader title="Audit and retention" description="Bounded channel events are stored in Forge for review and later RCA workflows." />
+                <Inline space="space.200" shouldWrap>
+                  <Box xcss={subtleSurfaceStyles}>
+                    <Stack space="space.050">
+                      <Heading as="h3" size="small">Retention</Heading>
+                      <Text>{form.transcriptRetentionDays} days</Text>
+                    </Stack>
+                  </Box>
+                  <Box xcss={subtleSurfaceStyles}>
+                    <Stack space="space.050">
+                      <Heading as="h3" size="small">File relay</Heading>
+                      <Text>{form.allowDccProxy ? 'Allowed by settings' : 'Disabled by settings'}</Text>
+                    </Stack>
+                  </Box>
+                  <Box xcss={subtleSurfaceStyles}>
+                    <Stack space="space.050">
+                      <Heading as="h3" size="small">Agent invites</Heading>
+                      <Text>{form.allowRovoInvites ? 'Enabled' : 'Disabled'}</Text>
+                    </Stack>
+                  </Box>
+                </Inline>
+                <SectionMessage appearance="info" title="Message composition">
+                  <Text>
+                    The composer supports @nick mentions and smart values for channel context. Supported values:
+                    {' {{channel}}, {{nick}}, {{server}}, {{agent}}, {{date}}, and {{time}}.'}
+                  </Text>
+                </SectionMessage>
+              </Box>
             </Stack>
-
-            {agentResult ? (
-              <SectionMessage appearance="info" title="Last queued action">
-                <CodeBlock language="json" text={JSON.stringify(agentResult, null, 2)} />
-              </SectionMessage>
-            ) : null}
-          </Stack>
-        ) : null}
-
-        {activeView === 'audit' ? (
-          <Stack space="space.200">
-            <Heading as="h2" size="medium">Audit and retention</Heading>
-            <Text>Channel event envelopes are stored in Forge storage for bounded audit and later RCA jobs.</Text>
-            <Text>Retention: {form.transcriptRetentionDays} days</Text>
-            <Text>DCC-style file sharing: {form.allowDccProxy ? 'allowed by settings' : 'disabled by settings'}</Text>
-          </Stack>
-        ) : null}
+          </TabPanel>
+        </Tabs>
       </Stack>
     </Box>
   );

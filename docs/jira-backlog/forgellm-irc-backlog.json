@@ -1,0 +1,139 @@
+{
+  "initiative": {
+    "summary": "ForgeLLM-IRC Incident Swarm Platform",
+    "description": "Deliver the ForgeLLM-IRC customer journey MVP from webhook intake through IRC swarm collaboration and captured RCA-ready outputs.",
+    "acceptanceCriteria": [
+      "P1 workflow is operational end-to-end for at least one tenant.",
+      "Core workflows are measurable with operational telemetry.",
+      "Security and governance baseline controls are enforced."
+    ]
+  },
+  "epics": [
+    {
+      "name": "Intake & Trace Translation",
+      "summary": "Build secure webhook intake and trace translation pipeline",
+      "stories": [
+        {
+          "summary": "Define and implement webhook ingest contract",
+          "tasks": [
+            "Create signed ingest payload schema with validation rules",
+            "Implement idempotency key strategy",
+            "Add ingest rejection telemetry for malformed payloads"
+          ]
+        },
+        {
+          "summary": "Implement trace translation enrichment",
+          "tasks": [
+            "Normalize trace envelope fields for frontend/backend/version/region",
+            "Add enrichment confidence metadata",
+            "Persist translation envelope with bounded retention"
+          ]
+        },
+        {
+          "summary": "Harden ingest reliability and replay safety",
+          "tasks": [
+            "Detect duplicate ingest events",
+            "Add retry-safe processing semantics",
+            "Document incident-ingest runbook"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IRC Swarm Orchestration (Bot + Rovo)",
+      "summary": "Orchestrate bot callbacks and Rovo triage workflows in incident channels",
+      "stories": [
+        {
+          "summary": "Standardize bot callback command routing",
+          "tasks": [
+            "Finalize callback envelope contract",
+            "Implement command dispatch for help/context/invite/ask/distill",
+            "Add bounded irc-message action responses"
+          ]
+        },
+        {
+          "summary": "Implement Rovo triage orchestration",
+          "tasks": [
+            "Queue Jira-grounded ask actions from Forge",
+            "Bind issue context fetch with permission-safe asApp calls",
+            "Persist queue/audit envelopes for action traceability"
+          ]
+        },
+        {
+          "summary": "Enforce channel policy controls",
+          "tasks": [
+            "Apply channel allowlist checks",
+            "Add callback token enforcement",
+            "Validate per-minute callback throttling behavior"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Capture & Knowledge Output",
+      "summary": "Capture swarm output into RCA/timeline artifacts with publish targets",
+      "stories": [
+        {
+          "summary": "Build distillation job pipeline",
+          "tasks": [
+            "Create job envelope schema for channel distillation",
+            "Support rca/timeline/best-practice output modes",
+            "Store bounded generated artifact metadata"
+          ]
+        },
+        {
+          "summary": "Integrate artifact publishing",
+          "tasks": [
+            "Publish draft output to Jira or Confluence target",
+            "Link generated artifact to incident issue context",
+            "Record publication status for retries"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Security & Governance Baseline",
+      "summary": "Ship minimum governance controls for incident-safe operation",
+      "stories": [
+        {
+          "summary": "Implement admin policy and RBAC controls",
+          "tasks": [
+            "Gate sensitive config paths to admins",
+            "Document retained data policy settings",
+            "Verify least-privilege scopes for wave-1"
+          ]
+        },
+        {
+          "summary": "Implement redaction and audit hardening",
+          "tasks": [
+            "Apply secret redaction before persistence",
+            "Add explicit audit envelope structure",
+            "Test redaction against representative tokens/secrets"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Observability & Ops Readiness",
+      "summary": "Establish telemetry, SLO checks, and runbooks for production operations",
+      "stories": [
+        {
+          "summary": "Instrument structured telemetry",
+          "tasks": [
+            "Emit ingest/callback/distillation metrics",
+            "Add correlation identifiers across workflow stages",
+            "Build operational dashboard query examples"
+          ]
+        },
+        {
+          "summary": "Codify failure-mode handling",
+          "tasks": [
+            "Define retry paths for callback failures",
+            "Create relay-down operational playbook",
+            "Add malformed trace recovery steps"
+          ]
+        }
+      ]
+    }
+  ]
+}

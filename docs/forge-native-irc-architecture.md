@@ -100,9 +100,9 @@ This repository now includes:
 
 - `manifest.yml`: Jira/Confluence global pages, Jira admin page, Rovo agent/actions, incident ingest webtrigger, IRC command webtrigger, and IRC event webtrigger.
 - `src/index.js`: resolver bootstrap, settings persistence, Rovo triage action, summary queue stub, incident ingest handler, IRC command callback, and IRC event callback.
-- `src/irc-bot-lib.js`: shared IRC parsing, command addressing, redaction, rate-limit, and Forge action translation helpers.
+- `src/irc-utils.js`: Forge-side IRC channel normalization and secret redaction helpers.
 - `src/frontend/index.jsx`: UI Kit native shell for navigation, setup, Rovo controls, audit status, WebSocket testing, and a native chat console.
-- `bot/a9sysop.js`: persistent Node IRC bot using real TCP/TLS IRC sockets and real Forge webtrigger callbacks.
+- `SuperchatServer/`: backend runtime split containing the persistent Node IRC bot, IRC helper library, InspIRCd, gateway, Cloudflare Tunnel config, and operational scripts.
 - `resources/rovo/prompts/incident-agent.txt`: first Rovo prompt.
 - `tests/index.test.js`: resolver and permission-boundary-style unit tests with mocked Forge APIs.
 

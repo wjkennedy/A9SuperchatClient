@@ -1,7 +1,7 @@
 const ResolverModule = require('@forge/resolver');
 const api = require('@forge/api');
 const crypto = require('crypto');
-const { normalizeChannels, redactSecrets } = require('./irc-bot-lib');
+const { normalizeChannels, redactSecrets } = require('./irc-utils');
 const { route, storage } = api;
 
 const Resolver = ResolverModule.default || ResolverModule;
@@ -19,8 +19,60 @@ const DEFAULT_SETTINGS = {
   allowDccProxy: false
 };
 
+const DEFAULT_AGENT_ADMIN_SETTINGS = {
+  defaultAssignments: [
+    {
+      channel: '#a9superchat',
+      agentName: 'A9 Superchat Channel Operator',
+      templateKey: 'incident-channel-operator'
+    },
+    {
+      channel: '#atlassian',
+      agentName: 'A9 Superchat Knowledge Steward',
+      templateKey: 'knowledge-steward'
+    }
+  ],
+  templates: [
+    {
+      key: 'incident-channel-operator',
+      name: 'Incident channel operator',
+      agentName: 'A9 Superchat Channel Operator',
+      description: 'Joins incident IRC channels, asks Jira-grounded triage questions, and distills the retained transcript into RCA or handoff drafts.',
+      instructions: 'Create a Rovo agent that can use the A9 Superchat actions. It should ask concise triage questions in the configured IRC channel, use Jira issue context when available, summarize channel evidence, and never post secrets or private customer data into IRC.',
+      starters: [
+        'Ask #a9superchat what evidence is missing for this incident',
+        'Distill #a9superchat into an RCA draft',
+        'Invite the channel operator into #a9superchat'
+      ],
+      actions: ['superchat-triage-action', 'superchat-channel-summary-action']
+    },
+    {
+      key: 'knowledge-steward',
+      name: 'Knowledge steward',
+      agentName: 'A9 Superchat Knowledge Steward',
+      description: 'Turns active IRC discussion into handoff notes, best-practice drafts, and Confluence-ready summaries.',
+      instructions: 'Create a Rovo agent focused on turning IRC conversation into durable knowledge. It should prefer summaries, timelines, and best-practice drafts over long chat replies. It should ask for missing context before making operational claims.',
+      starters: [
+        'Summarize #atlassian as a handoff',
+        'Create best-practice notes from #atlassian',
+        'List open questions from the current channel context'
+      ],
+      actions: ['superchat-channel-summary-action']
+    }
+  ],
+  rovoStudioUrl: 'https://studio.atlassian.com'
+};
+
 function userSettingsKey(accountId) {
   return `user-settings:${accountId || 'anonymous'}`;
+}
+
+function agentAdminSettingsKey() {
+  return 'agent-admin-settings:v1';
+}
+
+function agentQueueKey() {
+  return 'agent-message-queue:v1';
 }
 
 function botContextKey(contextId) {
@@ -150,6 +202,102 @@ function sanitizeSettings(settings) {
   return next;
 }
 
+function sanitizeTemplate(template, fallback = {}) {
+  const value = template && typeof template === 'object' ? template : {};
+  const key = String(value.key || fallback.key || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  if (!key) {
+    throw new Error('template key is required');
+  }
+
+  const starters = Array.isArray(value.starters)
+    ? value.starters.map((starter) => sanitizeText(starter, 160)).filter(Boolean).slice(0, 6)
+    : (fallback.starters || []);
+  const actions = Array.isArray(value.actions)
+    ? value.actions.map((action) => sanitizeText(action, 100)).filter(Boolean).slice(0, 8)
+    : (fallback.actions || []);
+
+  return {
+    key,
+    name: sanitizeText(value.name || fallback.name || key, 80),
+    agentName: sanitizeAgentName(value.agentName || fallback.agentName || value.name || fallback.name),
+    description: sanitizeText(value.description || fallback.description || '', 300),
+    instructions: sanitizeText(value.instructions || fallback.instructions || '', 2000),
+    starters,
+    actions
+  };
+}
+
+function sanitizeAgentAdminSettings(settings) {
+  const source = settings && typeof settings === 'object' ? settings : DEFAULT_AGENT_ADMIN_SETTINGS;
+  const templateMap = new Map();
+  const templates = (Array.isArray(source.templates) && source.templates.length ? source.templates : DEFAULT_AGENT_ADMIN_SETTINGS.templates)
+    .map((template, index) => sanitizeTemplate(template, DEFAULT_AGENT_ADMIN_SETTINGS.templates[index] || {}))
+    .slice(0, 12);
+  for (const template of templates) {
+    templateMap.set(template.key, template);
+  }
+
+  const defaultAssignments = (Array.isArray(source.defaultAssignments) ? source.defaultAssignments : DEFAULT_AGENT_ADMIN_SETTINGS.defaultAssignments)
+    .map((assignment) => {
+      const channel = sanitizeChannel(assignment.channel);
+      const templateKey = String(assignment.templateKey || templates[0]?.key || 'incident-channel-operator').trim();
+      const template = templateMap.get(templateKey) || templates[0];
+      return {
+        channel,
+        agentName: sanitizeAgentName(assignment.agentName || template.agentName),
+        templateKey: template.key
+      };
+    })
+    .slice(0, 25);
+
+  return {
+    defaultAssignments,
+    templates,
+    rovoStudioUrl: sanitizeText(source.rovoStudioUrl || DEFAULT_AGENT_ADMIN_SETTINGS.rovoStudioUrl, 500)
+  };
+}
+
+async function getAgentAdminSettings() {
+  const stored = await storage.get(agentAdminSettingsKey());
+  return sanitizeAgentAdminSettings(stored || DEFAULT_AGENT_ADMIN_SETTINGS);
+}
+
+function sanitizeAgentQueueRecord(record) {
+  const value = record && typeof record === 'object' ? record : {};
+  return {
+    id: sanitizeText(value.id || `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`, 80),
+    type: sanitizeText(value.type || 'relay-message', 40),
+    channel: sanitizeChannel(value.channel || '#a9superchat'),
+    actor: sanitizeText(value.actor || value.agentName || 'A9 Superchat', 120),
+    text: sanitizeText(value.text || value.note || '', 1000),
+    status: sanitizeText(value.status || 'queued', 40),
+    createdAt: sanitizeText(value.createdAt || new Date().toISOString(), 80),
+    issueKey: value.issueKey ? sanitizeText(value.issueKey, 40) : null,
+    agentName: value.agentName ? sanitizeAgentName(value.agentName) : null,
+    format: value.format ? sanitizeText(value.format, 80) : null
+  };
+}
+
+async function getRecentAgentQueue() {
+  const stored = await storage.get(agentQueueKey());
+  const records = Array.isArray(stored) ? stored : [];
+  return records.map(sanitizeAgentQueueRecord).slice(0, 50);
+}
+
+async function appendAgentQueueRecord(record) {
+  const nextRecord = sanitizeAgentQueueRecord(record);
+  const current = await getRecentAgentQueue();
+  const next = [nextRecord].concat(current).slice(0, 50);
+  await storage.set(agentQueueKey(), next);
+  return nextRecord;
+}
+
 async function getCurrentUser() {
   const jiraResponse = await api.asUser().requestJira(route`/rest/api/3/myself`);
   if (jiraResponse.ok) {
@@ -193,6 +341,8 @@ resolver.define('bootstrap', async ({ context }) => {
   const user = await getCurrentUser();
   const accountId = context && context.accountId ? context.accountId : user.accountId;
   const settings = await getSettings(accountId);
+  const agentAdminSettings = await getAgentAdminSettings();
+  const agentQueue = await getRecentAgentQueue();
 
   return {
     user: {
@@ -203,6 +353,8 @@ resolver.define('bootstrap', async ({ context }) => {
         .replace(/[^a-z0-9_-]/g, '')
         .slice(0, 20) || 'superchat'
     },
+    agentAdminSettings,
+    agentQueue,
     settings,
     capabilities: {
       forgeStorageSettings: true,
@@ -217,6 +369,16 @@ resolver.define('saveSettings', async ({ payload, context }) => {
   const settings = sanitizeSettings(payload && payload.settings);
   await storage.set(userSettingsKey(context.accountId), settings);
   return { ok: true, settings };
+});
+
+resolver.define('saveAgentAdminSettings', async ({ payload }) => {
+  const settings = sanitizeAgentAdminSettings(payload && payload.settings);
+  await storage.set(agentAdminSettingsKey(), settings);
+  return { ok: true, settings };
+});
+
+resolver.define('getAgentQueue', async () => {
+  return { ok: true, queue: await getRecentAgentQueue() };
 });
 
 resolver.define('recordChannelEvent', async ({ payload, context }) => {
@@ -269,6 +431,15 @@ async function queueRelayMessage({ channel, actor, text, issue }) {
     type: 'relay-message',
     ...message
   });
+  await appendAgentQueueRecord({
+    type: 'relay-message',
+    channel: message.channel,
+    actor: message.actor,
+    text: message.text,
+    status: message.status,
+    issueKey: issue && issue.issueKey,
+    createdAt: message.createdAt
+  });
 
   return message;
 }
@@ -285,6 +456,15 @@ async function queueAgentInvite({ channel, agentName, invitedBy }) {
   await storage.set(channelAuditKey(invite.channel), {
     type: 'agent-invite',
     ...invite
+  });
+  await appendAgentQueueRecord({
+    type: 'agent-invite',
+    channel: invite.channel,
+    actor: invite.invitedBy,
+    agentName: invite.agentName,
+    text: `${invite.agentName} invited into ${invite.channel}`,
+    status: invite.status,
+    createdAt: invite.createdAt
   });
 
   return invite;
@@ -318,6 +498,15 @@ async function rovoChannelSummaryAction(payload) {
   await storage.set(channelAuditKey(channel), {
     type: 'channel-summary',
     ...job,
+    createdAt: new Date().toISOString()
+  });
+  await appendAgentQueueRecord({
+    type: 'channel-summary',
+    channel,
+    actor: 'A9 Superchat Channel Operator',
+    text: `Distill ${channel} as ${job.format}`,
+    status: job.status,
+    format: job.format,
     createdAt: new Date().toISOString()
   });
   return job;
@@ -688,6 +877,8 @@ module.exports = {
   prepareBotContext,
   _private: {
     sanitizeSettings,
+    sanitizeAgentAdminSettings,
+    sanitizeAgentQueueRecord,
     sanitizeChannel,
     sanitizeAgentName,
     sanitizeNick,
@@ -696,6 +887,8 @@ module.exports = {
     assertCallbackRateLimit,
     validateBotToken,
     userSettingsKey,
+    agentAdminSettingsKey,
+    agentQueueKey,
     botContextKey,
     activeChannelContextKey
   }

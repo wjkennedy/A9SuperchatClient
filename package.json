@@ -20,6 +20,10 @@
     "jest": "^30.0.0"
   },
   "jest": {
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/SuperchatServer/"
+    ]
   }
 }
