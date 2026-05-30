@@ -134,11 +134,14 @@ test('queues Rovo triage message with Jira issue context', async () => {
   expect(result.source).toBe('rovo-action');
   expect(result.workflow).toBe('jira-grounded-triage-ask');
   expect(result.correlationId).toMatch(/^[a-f0-9]{24}:ok$/);
+  expect(result.id).toMatch(/^relay-[a-f0-9]{12}$/);
   expect(mockStorage.set).toHaveBeenCalledTimes(2);
+  expect(mockStorage.set.mock.calls[0][1].envelopeId).toBe(result.id);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('relay-message');
   expect(mockStorage.set.mock.calls[0][1].source).toBe('rovo-action');
   expect(mockStorage.set.mock.calls[0][1].workflow).toBe('jira-grounded-triage-ask');
   expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
+  expect(mockStorage.set.mock.calls[1][1][0].id).toBe(result.id);
   expect(mockStorage.set.mock.calls[1][1][0].source).toBe('rovo-action');
   expect(mockStorage.set.mock.calls[1][1][0].workflow).toBe('jira-grounded-triage-ask');
 });
@@ -158,6 +161,7 @@ test('queues Rovo triage even when Jira context is unavailable', async () => {
   expect(result.issue.contextSource).toBe('jira-asApp');
   expect(result.issue.contextStatus).toBe('unavailable');
   expect(result.correlationId).toMatch(/^[a-f0-9]{24}:unavailable$/);
+  expect(result.id).toMatch(/^relay-[a-f0-9]{12}$/);
   expect(mockStorage.set).toHaveBeenCalledTimes(2);
 });
 

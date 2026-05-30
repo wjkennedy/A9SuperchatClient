@@ -89,6 +89,10 @@ function channelAuditKey(channel, now = Date.now()) {
   return `channel-audit:${safeChannel}:${now}`;
 }
 
+function envelopeId(prefix = 'env') {
+  return `${prefix}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
 function assertObject(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${name} must be an object`);
@@ -428,7 +432,9 @@ async function fetchIssueSummary(issueKey) {
 }
 
 async function queueRelayMessage({ channel, actor, text, issue, source = 'forge', workflow = 'relay-message', correlationId = null }) {
+  const id = envelopeId('relay');
   const message = {
+    id,
     channel: sanitizeChannel(channel),
     actor: String(actor || 'A9 Superchat').slice(0, 80),
     text: String(text || '').slice(0, 1000),
@@ -441,10 +447,12 @@ async function queueRelayMessage({ channel, actor, text, issue, source = 'forge'
   };
 
   await storage.set(channelAuditKey(message.channel), {
+    envelopeId: id,
     type: 'relay-message',
     ...message
   });
   await appendAgentQueueRecord({
+    id,
     type: 'relay-message',
     channel: message.channel,
     actor: message.actor,
@@ -461,7 +469,9 @@ async function queueRelayMessage({ channel, actor, text, issue, source = 'forge'
 }
 
 async function queueAgentInvite({ channel, agentName, invitedBy }) {
+  const id = envelopeId('invite');
   const invite = {
+    id,
     channel: sanitizeChannel(channel),
     agentName: sanitizeAgentName(agentName),
     invitedBy: String(invitedBy || 'unknown').slice(0, 120),
@@ -470,10 +480,12 @@ async function queueAgentInvite({ channel, agentName, invitedBy }) {
   };
 
   await storage.set(channelAuditKey(invite.channel), {
+    envelopeId: id,
     type: 'agent-invite',
     ...invite
   });
   await appendAgentQueueRecord({
+    id,
     type: 'agent-invite',
     channel: invite.channel,
     actor: invite.invitedBy,
@@ -513,18 +525,22 @@ async function rovoTriageAction(payload) {
 
 async function rovoChannelSummaryAction(payload) {
   const channel = sanitizeChannel(payload.channel);
+  const id = envelopeId('summary');
   const job = {
+    id,
     channel,
     format: payload.format || 'rca',
     status: 'queued',
     note: 'Transcript distillation should run as an async job over retained channel-audit records.'
   };
   await storage.set(channelAuditKey(channel), {
+    envelopeId: id,
     type: 'channel-summary',
     ...job,
     createdAt: new Date().toISOString()
   });
   await appendAgentQueueRecord({
+    id,
     type: 'channel-summary',
     channel,
     actor: 'A9 Superchat Channel Operator',
@@ -1183,6 +1199,7 @@ module.exports = {
     parseIrcCommandEnvelope,
     parseIrcEventEnvelope,
     canonicalCommand,
-    boundedIrcActions
+    boundedIrcActions,
+    envelopeId
   }
 };
