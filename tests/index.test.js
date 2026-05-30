@@ -394,6 +394,63 @@ test('irc command webtrigger queues Jira-grounded ask', async () => {
   expect(mockStorage.set.mock.calls[2][0]).toBe(app._private.agentQueueKey());
 });
 
+test('irc command alias ctx routes to context handler', async () => {
+  mockStorage.get.mockResolvedValueOnce({
+    channel: '#a9superchat',
+    accountId: 'abc-123',
+    source: 'forge-browser',
+    pageTitle: 'Incident CS-123',
+    pageUrl: 'https://example.atlassian.net/browse/CS-123',
+    selectedText: '',
+    note: 'Active IRC channel #a9superchat',
+    transcript: ['Ada: timeline is incomplete'],
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60000).toISOString()
+  });
+
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'ctx',
+      args: ['0123456789abcdef']
+    })
+  });
+  expect(response.statusCode).toBe(202);
+});
+
+test('irc command alias summarize routes to distill handler', async () => {
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'summarize',
+      args: ['timeline']
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(202);
+  expect(body.queued.format).toBe('timeline');
+});
+
+test('irc command alias ? routes to help handler', async () => {
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: '?'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(200);
+  expect(body.actions[0].text).toContain('A9 commands');
+});
+
 test('irc event webtrigger welcomes new joiners', async () => {
   const response = await app.ircEvent({
     body: JSON.stringify({

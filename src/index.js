@@ -699,6 +699,68 @@ function parseIrcEventEnvelope(event) {
   return { body, contractVersion, channel, type, actorNick, botNick };
 }
 
+const COMMAND_ALIASES = {
+  '?': 'help',
+  h: 'help',
+  ctx: 'context',
+  summon: 'context',
+  summarize: 'distill',
+  summary: 'distill'
+};
+
+function canonicalCommand(command) {
+  const input = sanitizeText(String(command || '').trim().replace(/^\//, '').toLowerCase(), 40);
+  return COMMAND_ALIASES[input] || input;
+}
+
+function buildCommandHandlers({ channel, actorNick, args, body }) {
+  return {
+    help: async () => jsonResponse(200, {
+      ok: true,
+      actions: [
+        botMessage({
+          channel,
+          target: actorNick,
+          text: 'A9 commands: context ID, invite [agent], ask ISSUE-123 question, distill [rca|timeline|handoff|best-practice], help.'
+        })
+      ]
+    }),
+    invite: async () => {
+      const agentName = sanitizeAgentName(args.join(' ') || body.agentName);
+      const invite = await queueAgentInvite({ channel, agentName, invitedBy: actorNick });
+      return jsonResponse(202, {
+        ok: true,
+        queued: invite,
+        actions: [botMessage({ channel, text: `${invite.agentName} has been invited into ${channel}.` })]
+      });
+    },
+    context: async () => {
+      const contextId = args[0] || body.contextId;
+      const result = await activateBotContext({ channel, actorNick, contextId });
+      return jsonResponse(202, result);
+    },
+    ask: async () => {
+      const issueKey = args[0] || body.issueKey;
+      const question = sanitizeText(body.question || args.slice(1).join(' '), 700);
+      const queued = await rovoTriageAction({ issueKey, channel, question });
+      return jsonResponse(202, {
+        ok: true,
+        queued,
+        actions: [botMessage({ channel, text: queued.text })]
+      });
+    },
+    distill: async () => {
+      const format = sanitizeText(body.format || args[0] || 'rca', 60);
+      const queued = await rovoChannelSummaryAction({ channel, format });
+      return jsonResponse(202, {
+        ok: true,
+        queued,
+        actions: [botMessage({ channel, text: `Queued ${queued.format} distillation for ${channel}.` })]
+      });
+    }
+  };
+}
+
 function rawBodyString(event) {
   if (!event || event.body == null) {
     return '';
@@ -845,7 +907,8 @@ async function ircCommand(event) {
       return jsonResponse(401, { ok: false, error: 'Unauthorized IRC bot callback' });
     }
 
-    const { body, contractVersion, channel, actorNick, command, args } = parseIrcCommandEnvelope(event);
+    const { body, contractVersion, channel, actorNick, command: rawCommand, args } = parseIrcCommandEnvelope(event);
+    const command = canonicalCommand(rawCommand || 'help') || 'help';
 
     assertBotChannelAllowed(channel);
     await assertCallbackRateLimit({ channel, actor: actorNick, action: command || 'help' });
@@ -858,69 +921,10 @@ async function ircCommand(event) {
       args: args.slice(0, 8).map((arg) => sanitizeText(arg, 160))
     });
 
-    if (!command || command === 'help') {
-      return jsonResponse(200, {
-        ok: true,
-        actions: [
-          botMessage({
-            channel,
-            target: actorNick,
-            text: 'A9 commands: context ID, invite [agent], ask ISSUE-123 question, distill [rca|timeline|handoff|best-practice], help.'
-          })
-        ]
-      });
-    }
-
-    if (command === 'invite') {
-      const agentName = sanitizeAgentName(args.join(' ') || body.agentName);
-      const invite = await queueAgentInvite({ channel, agentName, invitedBy: actorNick });
-      return jsonResponse(202, {
-        ok: true,
-        queued: invite,
-        actions: [
-          botMessage({
-            channel,
-            text: `${invite.agentName} has been invited into ${channel}.`
-          })
-        ]
-      });
-    }
-
-    if (command === 'context' || command === 'ctx' || command === 'summon') {
-      const contextId = args[0] || body.contextId;
-      const result = await activateBotContext({ channel, actorNick, contextId });
-      return jsonResponse(202, result);
-    }
-
-    if (command === 'ask') {
-      const issueKey = args[0] || body.issueKey;
-      const question = sanitizeText(body.question || args.slice(1).join(' '), 700);
-      const queued = await rovoTriageAction({ issueKey, channel, question });
-      return jsonResponse(202, {
-        ok: true,
-        queued,
-        actions: [
-          botMessage({
-            channel,
-            text: queued.text
-          })
-        ]
-      });
-    }
-
-    if (command === 'distill' || command === 'summarize' || command === 'summary') {
-      const format = sanitizeText(body.format || args[0] || 'rca', 60);
-      const queued = await rovoChannelSummaryAction({ channel, format });
-      return jsonResponse(202, {
-        ok: true,
-        queued,
-        actions: [
-          botMessage({
-            channel,
-            text: `Queued ${queued.format} distillation for ${channel}.`
-          })
-        ]
-      });
+    const handlers = buildCommandHandlers({ channel, actorNick, args, body });
+    const handler = handlers[command];
+    if (handler) {
+      return handler();
     }
 
     return jsonResponse(400, {
@@ -1133,6 +1137,7 @@ module.exports = {
     getTraceRetentionDays,
     parseContractVersion,
     parseIrcCommandEnvelope,
-    parseIrcEventEnvelope
+    parseIrcEventEnvelope,
+    canonicalCommand
   }
 };
