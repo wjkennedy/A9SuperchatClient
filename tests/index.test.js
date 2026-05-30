@@ -554,7 +554,7 @@ test('incident ingest honors idempotency key and deduplicates retries', async ()
   mockStorage.get.mockImplementation(async (key) => {
     if (String(key).startsWith('ingest-idempotency:')) {
       idempotencyReads += 1;
-      return idempotencyReads === 1 ? null : { queued: { id: 'relay-1' } };
+      return idempotencyReads === 1 ? null : { status: 'complete', queued: { id: 'relay-1' } };
     }
     return null;
   });
@@ -683,4 +683,20 @@ test('incident ingest deduplicates repeated payloads without explicit idempotenc
   expect(first.statusCode).toBe(202);
   expect(second.statusCode).toBe(202);
   expect(secondBody.duplicate).toBe(true);
+});
+
+test('incident ingest returns retryLater while same payload is processing', async () => {
+  mockStorage.get.mockResolvedValueOnce({ status: 'processing' });
+
+  const response = await app.incidentIngest({
+    headers: { 'x-idempotency-key': ['processing-1'] },
+    body: JSON.stringify({
+      channel: '#p1',
+      question: 'Still processing'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(202);
+  expect(body.retryLater).toBe(true);
 });

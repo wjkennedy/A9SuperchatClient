@@ -987,7 +987,7 @@ async function incidentIngest(event) {
     const dedupeKey = idempotencyKey || ingestFingerprintKey(event, body);
     if (dedupeKey) {
       const seen = await storage.get(dedupeKey);
-      if (seen) {
+      if (seen && seen.status === 'complete') {
         await recordIncidentIngestEnvelope({
           type: 'incident-ingest-duplicate',
           channel,
@@ -995,6 +995,18 @@ async function incidentIngest(event) {
         });
         return jsonResponse(202, { ok: true, duplicate: true, queued: seen.queued || null });
       }
+      if (seen && seen.status === 'processing') {
+        await recordIncidentIngestEnvelope({
+          type: 'incident-ingest-retry-later',
+          channel,
+          idempotencyKey: dedupeKey
+        });
+        return jsonResponse(202, { ok: true, retryLater: true });
+      }
+      await storage.set(dedupeKey, {
+        status: 'processing',
+        createdAt: new Date().toISOString()
+      });
     }
 
     const translation = normalizeTraceEnvelope(event, body);
@@ -1016,6 +1028,7 @@ async function incidentIngest(event) {
 
     if (dedupeKey) {
       await storage.set(dedupeKey, {
+        status: 'complete',
         queued,
         createdAt: new Date().toISOString()
       });
@@ -1031,6 +1044,21 @@ async function incidentIngest(event) {
 
     return jsonResponse(202, { ok: true, queued, translation, translationRecord });
   } catch (error) {
+    const body = (() => {
+      try {
+        return parseJsonBody(event);
+      } catch {
+        return {};
+      }
+    })();
+    const failedKey = ingestIdempotencyKey(event, body) || ingestFingerprintKey(event, body);
+    if (failedKey) {
+      await storage.set(failedKey, {
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        error: sanitizeText(error.message || 'incident-ingest-failed', 220)
+      });
+    }
     await recordIncidentIngestEnvelope({
       type: 'incident-ingest-invalid',
       reason: sanitizeText(error.message || 'invalid-body', 220)
