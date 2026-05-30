@@ -433,9 +433,11 @@ async function fetchIssueSummary(issueKey) {
 
 async function queueRelayMessage({ channel, actor, text, issue, source = 'forge', workflow = 'relay-message', correlationId = null }) {
   const id = envelopeId('relay');
+  const normalizedChannel = sanitizeChannel(channel);
+  assertBotChannelAllowed(normalizedChannel);
   const message = {
     id,
-    channel: sanitizeChannel(channel),
+    channel: normalizedChannel,
     actor: String(actor || 'A9 Superchat').slice(0, 80),
     text: String(text || '').slice(0, 1000),
     issue: issue || null,
@@ -470,9 +472,11 @@ async function queueRelayMessage({ channel, actor, text, issue, source = 'forge'
 
 async function queueAgentInvite({ channel, agentName, invitedBy }) {
   const id = envelopeId('invite');
+  const normalizedChannel = sanitizeChannel(channel);
+  assertBotChannelAllowed(normalizedChannel);
   const invite = {
     id,
-    channel: sanitizeChannel(channel),
+    channel: normalizedChannel,
     agentName: sanitizeAgentName(agentName),
     invitedBy: String(invitedBy || 'unknown').slice(0, 120),
     createdAt: new Date().toISOString(),
@@ -525,6 +529,7 @@ async function rovoTriageAction(payload) {
 
 async function rovoChannelSummaryAction(payload) {
   const channel = sanitizeChannel(payload.channel);
+  assertBotChannelAllowed(channel);
   const id = envelopeId('summary');
   const job = {
     id,

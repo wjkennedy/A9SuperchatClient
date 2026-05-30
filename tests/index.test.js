@@ -165,6 +165,36 @@ test('queues Rovo triage even when Jira context is unavailable', async () => {
   expect(mockStorage.set).toHaveBeenCalledTimes(2);
 });
 
+test('rovo triage action enforces channel allowlist outside callback path', async () => {
+  process.env.SUPERCHAT_ALLOWED_CHANNELS = '#a9superchat,#atlassian';
+  mockRequestJira.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      fields: {
+        summary: 'Portal outage',
+        status: { name: 'Investigating' },
+        priority: { name: 'Highest' },
+        issuetype: { name: 'Incident' }
+      }
+    })
+  });
+
+  await expect(app.rovoTriageAction({
+    issueKey: 'CS-123',
+    channel: '#p1',
+    question: 'What should support triage?'
+  })).rejects.toThrow('not allowed');
+});
+
+test('channel summary action enforces channel allowlist outside callback path', async () => {
+  process.env.SUPERCHAT_ALLOWED_CHANNELS = '#a9superchat,#atlassian';
+
+  await expect(app.rovoChannelSummaryAction({
+    channel: '#p1',
+    format: 'rca'
+  })).rejects.toThrow('not allowed');
+});
+
 test('bootstrap prefers Jira identity and storage settings', async () => {
   mockRequestJira.mockResolvedValueOnce({
     ok: true,
