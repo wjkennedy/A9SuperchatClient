@@ -661,3 +661,26 @@ test('incident ingest persists trace translation with bounded retention', async 
   expect(persistedCall).toBeTruthy();
   expect(persistedCall[1].retentionDays).toBe(30);
 });
+
+test('incident ingest deduplicates repeated payloads without explicit idempotency key', async () => {
+  const memory = new Map();
+  mockStorage.get.mockImplementation(async (key) => memory.get(key));
+  mockStorage.set.mockImplementation(async (key, value) => {
+    memory.set(key, value);
+  });
+
+  const event = {
+    body: JSON.stringify({
+      channel: '#p1',
+      question: 'Same payload'
+    })
+  };
+
+  const first = await app.incidentIngest(event);
+  const second = await app.incidentIngest(event);
+  const secondBody = JSON.parse(second.body);
+
+  expect(first.statusCode).toBe(202);
+  expect(second.statusCode).toBe(202);
+  expect(secondBody.duplicate).toBe(true);
+});

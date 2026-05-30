@@ -726,6 +726,12 @@ function ingestIdempotencyKey(event, body) {
   return null;
 }
 
+function ingestFingerprintKey(event, body) {
+  const raw = rawBodyString(event);
+  const digest = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
+  return `ingest-fingerprint:${digest}`;
+}
+
 function normalizeTraceEnvelope(event, body) {
   const trace = body && typeof body.trace === 'object' ? body.trace : {};
   const frontend = body && typeof body.frontend === 'object' ? body.frontend : (trace.frontend || {});
@@ -978,13 +984,14 @@ async function incidentIngest(event) {
     const body = parseJsonBody(event);
     const channel = sanitizeChannel(body.channel || '#incident');
     const idempotencyKey = ingestIdempotencyKey(event, body);
-    if (idempotencyKey) {
-      const seen = await storage.get(idempotencyKey);
+    const dedupeKey = idempotencyKey || ingestFingerprintKey(event, body);
+    if (dedupeKey) {
+      const seen = await storage.get(dedupeKey);
       if (seen) {
         await recordIncidentIngestEnvelope({
           type: 'incident-ingest-duplicate',
           channel,
-          idempotencyKey
+          idempotencyKey: dedupeKey
         });
         return jsonResponse(202, { ok: true, duplicate: true, queued: seen.queued || null });
       }
@@ -1007,8 +1014,8 @@ async function incidentIngest(event) {
       issueKey: issue ? issue.key : null
     });
 
-    if (idempotencyKey) {
-      await storage.set(idempotencyKey, {
+    if (dedupeKey) {
+      await storage.set(dedupeKey, {
         queued,
         createdAt: new Date().toISOString()
       });
@@ -1019,7 +1026,7 @@ async function incidentIngest(event) {
       channel,
       issueKey: issue ? issue.key : null,
       traceId: translation.traceId,
-      idempotencyKey
+      idempotencyKey: dedupeKey
     });
 
     return jsonResponse(202, { ok: true, queued, translation, translationRecord });
@@ -1061,6 +1068,7 @@ module.exports = {
     activeChannelContextKey,
     validateIngestSignature,
     ingestIdempotencyKey,
+    ingestFingerprintKey,
     normalizeTraceEnvelope,
     getTraceRetentionDays
   }
