@@ -767,6 +767,32 @@ function normalizeTraceEnvelope(event, body) {
   return normalized;
 }
 
+function getTraceRetentionDays() {
+  const parsed = Number(process.env.SUPERCHAT_TRACE_RETENTION_DAYS || 14);
+  if (!Number.isFinite(parsed)) {
+    return 14;
+  }
+  return Math.max(1, Math.min(30, Math.floor(parsed)));
+}
+
+async function persistTraceTranslationEnvelope({ channel, translation, issueKey }) {
+  const retentionDays = getTraceRetentionDays();
+  const now = Date.now();
+  const expiresAt = new Date(now + (retentionDays * 24 * 60 * 60 * 1000)).toISOString();
+  const traceSlug = translation.traceId || crypto.randomBytes(4).toString('hex');
+  const key = `trace-translation:${traceSlug}:${now}`;
+  const record = {
+    channel,
+    issueKey: issueKey || null,
+    translation,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+    retentionDays
+  };
+  await storage.set(key, record);
+  return { key, ...record };
+}
+
 async function ircCommand(event) {
   try {
     if (!validateBotToken(event)) {
@@ -975,6 +1001,11 @@ async function incidentIngest(event) {
       issue,
       translation
     });
+    const translationRecord = await persistTraceTranslationEnvelope({
+      channel,
+      translation,
+      issueKey: issue ? issue.key : null
+    });
 
     if (idempotencyKey) {
       await storage.set(idempotencyKey, {
@@ -991,7 +1022,7 @@ async function incidentIngest(event) {
       idempotencyKey
     });
 
-    return jsonResponse(202, { ok: true, queued, translation });
+    return jsonResponse(202, { ok: true, queued, translation, translationRecord });
   } catch (error) {
     await recordIncidentIngestEnvelope({
       type: 'incident-ingest-invalid',
@@ -1030,6 +1061,7 @@ module.exports = {
     activeChannelContextKey,
     validateIngestSignature,
     ingestIdempotencyKey,
-    normalizeTraceEnvelope
+    normalizeTraceEnvelope,
+    getTraceRetentionDays
   }
 };

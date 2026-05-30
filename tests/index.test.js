@@ -30,10 +30,15 @@ const app = require('../src/index');
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockStorage.get.mockReset();
+  mockStorage.set.mockReset();
+  mockRequestJira.mockReset();
+  mockRequestConfluence.mockReset();
   delete process.env.SUPERCHAT_BOT_TOKEN;
   delete process.env.SUPERCHAT_ALLOWED_CHANNELS;
   delete process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE;
   delete process.env.SUPERCHAT_INGEST_SECRET;
+  delete process.env.SUPERCHAT_TRACE_RETENTION_DAYS;
 });
 
 test('sanitizes valid settings for Forge storage', () => {
@@ -635,4 +640,24 @@ test('trace translation confidence reflects missing enrichment fields', () => {
   expect(normalized.confidence.score).toBeLessThan(1);
   expect(normalized.confidence.missingFields).toContain('backend.service');
   expect(normalized.confidence.missingFields).toContain('frontend.version');
+});
+
+test('incident ingest persists trace translation with bounded retention', async () => {
+  process.env.SUPERCHAT_TRACE_RETENTION_DAYS = '45';
+
+  const response = await app.incidentIngest({
+    body: JSON.stringify({
+      channel: '#p1',
+      traceId: 'trace-retention-1',
+      frontend: { service: 'portal-ui' }
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(202);
+  expect(body.translationRecord.retentionDays).toBe(30);
+  expect(body.translationRecord.expiresAt).toBeTruthy();
+  const persistedCall = mockStorage.set.mock.calls.find(([key]) => String(key).startsWith('trace-translation:'));
+  expect(persistedCall).toBeTruthy();
+  expect(persistedCall[1].retentionDays).toBe(30);
 });
