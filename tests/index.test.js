@@ -322,6 +322,7 @@ test('irc context command activates browser context for a channel', async () => 
 test('irc command webtrigger returns bot help action', async () => {
   const response = await app.ircCommand({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#a9superchat',
       actorNick: 'Ada',
       command: 'help'
@@ -344,6 +345,7 @@ test('irc command webtrigger returns bot help action', async () => {
 test('irc command webtrigger queues agent invite', async () => {
   const response = await app.ircCommand({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#a9superchat',
       actorNick: 'Ada',
       command: 'invite',
@@ -375,6 +377,7 @@ test('irc command webtrigger queues Jira-grounded ask', async () => {
 
   const response = await app.ircCommand({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#p1',
       actorNick: 'Ada',
       command: 'ask',
@@ -394,6 +397,7 @@ test('irc command webtrigger queues Jira-grounded ask', async () => {
 test('irc event webtrigger welcomes new joiners', async () => {
   const response = await app.ircEvent({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#atlassian',
       type: 'join',
       actorNick: 'Ada',
@@ -416,6 +420,7 @@ test('irc event webtrigger welcomes new joiners', async () => {
 test('irc event webtrigger queues invite on invite event', async () => {
   const response = await app.ircEvent({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#a9superchat',
       type: 'invite',
       actorNick: 'Ada',
@@ -440,6 +445,7 @@ test('irc command webtrigger rejects invalid bot token when configured', async (
       'x-superchat-bot-token': ['wrong-secret']
     },
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#a9superchat',
       actorNick: 'Ada',
       command: 'help'
@@ -460,6 +466,7 @@ test('irc command webtrigger accepts valid bot token when configured', async () 
       'x-superchat-bot-token': ['shared-secret']
     },
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#a9superchat',
       actorNick: 'Ada',
       command: 'help'
@@ -475,6 +482,7 @@ test('irc command webtrigger enforces configured channel allowlist', async () =>
 
   const response = await app.ircCommand({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#random',
       actorNick: 'Ada',
       command: 'help'
@@ -493,6 +501,7 @@ test('irc command webtrigger enforces configured storage-backed rate limit', asy
 
   const response = await app.ircCommand({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#a9superchat',
       actorNick: 'Ada',
       command: 'help'
@@ -520,6 +529,7 @@ test('irc command webtrigger redacts secrets before returning channel actions', 
 
   const response = await app.ircCommand({
     body: JSON.stringify({
+      contractVersion: 1,
       channel: '#p1',
       actorNick: 'Ada',
       command: 'ask',
@@ -531,6 +541,37 @@ test('irc command webtrigger redacts secrets before returning channel actions', 
   expect(response.statusCode).toBe(202);
   expect(body.actions[0].text).toContain('token=<redacted>');
   expect(body.actions[0].text).not.toContain('super-secret-token');
+});
+
+test('irc command webtrigger rejects unsupported callback contract version', async () => {
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 2,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'help'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(400);
+  expect(body.error).toContain('Unsupported callback contractVersion');
+});
+
+test('irc command webtrigger rejects non-array args', async () => {
+  const response = await app.ircCommand({
+    body: JSON.stringify({
+      contractVersion: 1,
+      channel: '#a9superchat',
+      actorNick: 'Ada',
+      command: 'ask',
+      args: 'CS-123 what changed'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(400);
+  expect(body.error).toContain('args must be an array');
 });
 
 test('incident ingest rejects invalid signature when secret is configured', async () => {

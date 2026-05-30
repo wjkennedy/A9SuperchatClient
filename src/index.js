@@ -659,6 +659,46 @@ function parseJsonBody(event) {
   return JSON.parse(event.body);
 }
 
+function parseContractVersion(value) {
+  if (value == null || value === '') {
+    return 1;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) {
+    throw new Error('callback contractVersion must be an integer');
+  }
+  if (parsed !== 1) {
+    throw new Error(`Unsupported callback contractVersion: ${parsed}`);
+  }
+  return parsed;
+}
+
+function parseIrcCommandEnvelope(event) {
+  const body = parseJsonBody(event);
+  assertObject(body, 'body');
+  const contractVersion = parseContractVersion(body.contractVersion);
+  const channel = sanitizeChannel(body.channel || '#a9superchat');
+  const actorNick = sanitizeNick(body.actorNick, 'irc-user');
+  const command = sanitizeText(String(body.command || '').trim().replace(/^\//, '').toLowerCase(), 40);
+  const argsRaw = body.args == null ? [] : body.args;
+  if (!Array.isArray(argsRaw)) {
+    throw new Error('args must be an array of strings');
+  }
+  const args = argsRaw.slice(0, 8).map((arg) => sanitizeText(String(arg), 160));
+  return { body, contractVersion, channel, actorNick, command, args };
+}
+
+function parseIrcEventEnvelope(event) {
+  const body = parseJsonBody(event);
+  assertObject(body, 'body');
+  const contractVersion = parseContractVersion(body.contractVersion);
+  const channel = sanitizeChannel(body.channel || '#a9superchat');
+  const type = sanitizeText(String(body.type || '').trim().toLowerCase(), 40);
+  const actorNick = sanitizeNick(body.actorNick, 'irc-user');
+  const botNick = sanitizeNick(body.botNick, 'A9SysOp');
+  return { body, contractVersion, channel, type, actorNick, botNick };
+}
+
 function rawBodyString(event) {
   if (!event || event.body == null) {
     return '';
@@ -805,18 +845,14 @@ async function ircCommand(event) {
       return jsonResponse(401, { ok: false, error: 'Unauthorized IRC bot callback' });
     }
 
-    const body = parseJsonBody(event);
-    assertObject(body, 'body');
-    const channel = sanitizeChannel(body.channel || '#a9superchat');
-    const actorNick = sanitizeNick(body.actorNick, 'irc-user');
-    const command = String(body.command || '').trim().replace(/^\//, '').toLowerCase();
-    const args = Array.isArray(body.args) ? body.args.map((arg) => String(arg)) : [];
+    const { body, contractVersion, channel, actorNick, command, args } = parseIrcCommandEnvelope(event);
 
     assertBotChannelAllowed(channel);
     await assertCallbackRateLimit({ channel, actor: actorNick, action: command || 'help' });
 
     await recordBotEnvelope(channel, {
       type: 'irc-command',
+      contractVersion,
       actorNick,
       command,
       args: args.slice(0, 8).map((arg) => sanitizeText(arg, 160))
@@ -912,18 +948,14 @@ async function ircEvent(event) {
       return jsonResponse(401, { ok: false, error: 'Unauthorized IRC bot callback' });
     }
 
-    const body = parseJsonBody(event);
-    assertObject(body, 'body');
-    const channel = sanitizeChannel(body.channel || '#a9superchat');
-    const type = String(body.type || '').trim().toLowerCase();
-    const actorNick = sanitizeNick(body.actorNick, 'irc-user');
-    const botNick = sanitizeNick(body.botNick, 'A9SysOp');
+    const { body, contractVersion, channel, type, actorNick, botNick } = parseIrcEventEnvelope(event);
 
     assertBotChannelAllowed(channel);
     await assertCallbackRateLimit({ channel, actor: actorNick, action: type || 'event' });
 
     await recordBotEnvelope(channel, {
       type: 'irc-event',
+      contractVersion,
       eventType: sanitizeText(type, 40),
       actorNick,
       botNick,
@@ -1098,6 +1130,9 @@ module.exports = {
     ingestIdempotencyKey,
     ingestFingerprintKey,
     normalizeTraceEnvelope,
-    getTraceRetentionDays
+    getTraceRetentionDays,
+    parseContractVersion,
+    parseIrcCommandEnvelope,
+    parseIrcEventEnvelope
   }
 };
