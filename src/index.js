@@ -659,6 +659,16 @@ function parseJsonBody(event) {
   return JSON.parse(event.body);
 }
 
+function rawBodyString(event) {
+  if (!event || event.body == null) {
+    return '';
+  }
+  if (typeof event.body === 'string') {
+    return event.body;
+  }
+  return JSON.stringify(event.body);
+}
+
 function botMessage({ channel, text, target = null }) {
   return {
     type: 'irc-message',
@@ -674,6 +684,46 @@ async function recordBotEnvelope(channel, envelope) {
     channel,
     createdAt: new Date().toISOString()
   });
+}
+
+async function recordIncidentIngestEnvelope(envelope) {
+  await storage.set(`incident-ingest:${Date.now()}`, {
+    ...envelope,
+    createdAt: new Date().toISOString()
+  });
+}
+
+function validateIngestSignature(event, rawBody) {
+  const secret = process.env.SUPERCHAT_INGEST_SECRET;
+  if (!secret) {
+    return true;
+  }
+
+  const actual = getHeader(event && event.headers, 'x-superchat-signature');
+  if (!actual) {
+    return false;
+  }
+
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  const normalizedActual = String(actual).replace(/^sha256=/i, '').trim();
+  if (normalizedActual.length !== expected.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(normalizedActual), Buffer.from(expected));
+}
+
+function ingestIdempotencyKey(event, body) {
+  const fromHeader = getHeader(event && event.headers, 'x-idempotency-key');
+  if (fromHeader) {
+    return `ingest-idempotency:${sanitizeText(fromHeader, 140)}`;
+  }
+  if (body && body.traceId) {
+    return `ingest-idempotency:trace:${sanitizeText(body.traceId, 160)}`;
+  }
+  if (body && body.eventId) {
+    return `ingest-idempotency:event:${sanitizeText(body.eventId, 160)}`;
+  }
+  return null;
 }
 
 async function ircCommand(event) {
@@ -848,23 +898,67 @@ async function ircEvent(event) {
 }
 
 async function incidentIngest(event) {
-  const body = parseJsonBody(event);
-  const channel = sanitizeChannel(body.channel || '#incident');
-  const issue = body.issueKey ? await fetchIssueSummary(body.issueKey) : null;
-  const question = body.question || 'A high-priority customer issue needs triage. What evidence should support accurate routing?';
+  const rawBody = rawBodyString(event);
+  if (!validateIngestSignature(event, rawBody)) {
+    await recordIncidentIngestEnvelope({
+      type: 'incident-ingest-rejected',
+      reason: 'invalid-signature'
+    });
+    return jsonResponse(401, { ok: false, error: 'Invalid incident ingest signature' });
+  }
 
-  const queued = await queueRelayMessage({
-    channel,
-    actor: body.actor || 'A9 Superchat Incident Ingest',
-    text: question,
-    issue
-  });
+  try {
+    const body = parseJsonBody(event);
+    const channel = sanitizeChannel(body.channel || '#incident');
+    const idempotencyKey = ingestIdempotencyKey(event, body);
+    if (idempotencyKey) {
+      const seen = await storage.get(idempotencyKey);
+      if (seen) {
+        await recordIncidentIngestEnvelope({
+          type: 'incident-ingest-duplicate',
+          channel,
+          idempotencyKey
+        });
+        return jsonResponse(202, { ok: true, duplicate: true, queued: seen.queued || null });
+      }
+    }
 
-  return {
-    statusCode: 202,
-    headers: { 'content-type': ['application/json'] },
-    body: JSON.stringify({ ok: true, queued })
-  };
+    const issue = body.issueKey ? await fetchIssueSummary(body.issueKey) : null;
+    const question = body.question || 'A high-priority customer issue needs triage. What evidence should support accurate routing?';
+
+    const queued = await queueRelayMessage({
+      channel,
+      actor: body.actor || 'A9 Superchat Incident Ingest',
+      text: question,
+      issue
+    });
+
+    if (idempotencyKey) {
+      await storage.set(idempotencyKey, {
+        queued,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    await recordIncidentIngestEnvelope({
+      type: 'incident-ingest-accepted',
+      channel,
+      issueKey: issue ? issue.key : null,
+      traceId: body.traceId ? sanitizeText(body.traceId, 160) : null,
+      idempotencyKey
+    });
+
+    return jsonResponse(202, { ok: true, queued });
+  } catch (error) {
+    await recordIncidentIngestEnvelope({
+      type: 'incident-ingest-invalid',
+      reason: sanitizeText(error.message || 'invalid-body', 220)
+    });
+    return jsonResponse(400, {
+      ok: false,
+      error: error.message || 'Invalid incident ingest payload'
+    });
+  }
 }
 
 module.exports = {
@@ -890,6 +984,8 @@ module.exports = {
     agentAdminSettingsKey,
     agentQueueKey,
     botContextKey,
-    activeChannelContextKey
+    activeChannelContextKey,
+    validateIngestSignature,
+    ingestIdempotencyKey
   }
 };

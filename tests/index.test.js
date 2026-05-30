@@ -33,6 +33,7 @@ beforeEach(() => {
   delete process.env.SUPERCHAT_BOT_TOKEN;
   delete process.env.SUPERCHAT_ALLOWED_CHANNELS;
   delete process.env.SUPERCHAT_CALLBACK_RATE_LIMIT_PER_MINUTE;
+  delete process.env.SUPERCHAT_INGEST_SECRET;
 });
 
 test('sanitizes valid settings for Forge storage', () => {
@@ -525,4 +526,64 @@ test('irc command webtrigger redacts secrets before returning channel actions', 
   expect(response.statusCode).toBe(202);
   expect(body.actions[0].text).toContain('token=<redacted>');
   expect(body.actions[0].text).not.toContain('super-secret-token');
+});
+
+test('incident ingest rejects invalid signature when secret is configured', async () => {
+  process.env.SUPERCHAT_INGEST_SECRET = 'ingest-secret';
+
+  const response = await app.incidentIngest({
+    headers: { 'x-superchat-signature': ['sha256=wrong'] },
+    body: JSON.stringify({
+      channel: '#p1',
+      question: 'Need triage'
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(401);
+  expect(body.error).toContain('Invalid incident ingest signature');
+});
+
+test('incident ingest honors idempotency key and deduplicates retries', async () => {
+  let idempotencyReads = 0;
+  mockStorage.get.mockImplementation(async (key) => {
+    if (String(key).startsWith('ingest-idempotency:')) {
+      idempotencyReads += 1;
+      return idempotencyReads === 1 ? null : { queued: { id: 'relay-1' } };
+    }
+    return null;
+  });
+
+  const first = await app.incidentIngest({
+    headers: { 'x-idempotency-key': ['abc-123'] },
+    body: JSON.stringify({
+      channel: '#p1',
+      question: 'Need triage'
+    })
+  });
+  const second = await app.incidentIngest({
+    headers: { 'x-idempotency-key': ['abc-123'] },
+    body: JSON.stringify({
+      channel: '#p1',
+      question: 'Need triage'
+    })
+  });
+
+  const firstBody = JSON.parse(first.body);
+  const secondBody = JSON.parse(second.body);
+  expect(first.statusCode).toBe(202);
+  expect(firstBody.ok).toBe(true);
+  expect(second.statusCode).toBe(202);
+  expect(secondBody.duplicate).toBe(true);
+});
+
+test('incident ingest records malformed payload and returns 400', async () => {
+  const response = await app.incidentIngest({
+    body: '{"channel":"#p1", "question":'
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(400);
+  expect(body.ok).toBe(false);
+  expect(mockStorage.set).toHaveBeenCalled();
 });
