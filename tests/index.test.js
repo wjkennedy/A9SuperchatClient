@@ -587,3 +587,32 @@ test('incident ingest records malformed payload and returns 400', async () => {
   expect(body.ok).toBe(false);
   expect(mockStorage.set).toHaveBeenCalled();
 });
+
+test('incident ingest normalizes trace translation envelope fields', async () => {
+  const response = await app.incidentIngest({
+    headers: { 'x-trace-id': ['trace-hdr-123'] },
+    body: JSON.stringify({
+      channel: '#p1',
+      trace: {
+        frontend: { name: 'portal-ui', version: '1.2.3', region: 'us-east-1' },
+        backend: { service: 'incident-api', version: '2026.05.30', region: 'us-west-2' }
+      }
+    })
+  });
+  const body = JSON.parse(response.body);
+
+  expect(response.statusCode).toBe(202);
+  expect(body.translation).toMatchObject({
+    traceId: 'trace-hdr-123',
+    frontend: {
+      service: 'portal-ui',
+      version: '1.2.3',
+      region: 'us-east-1'
+    },
+    backend: {
+      service: 'incident-api',
+      version: '2026.05.30',
+      region: 'us-west-2'
+    }
+  });
+});

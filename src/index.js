@@ -726,6 +726,28 @@ function ingestIdempotencyKey(event, body) {
   return null;
 }
 
+function normalizeTraceEnvelope(event, body) {
+  const trace = body && typeof body.trace === 'object' ? body.trace : {};
+  const frontend = body && typeof body.frontend === 'object' ? body.frontend : (trace.frontend || {});
+  const backend = body && typeof body.backend === 'object' ? body.backend : (trace.backend || {});
+  const traceIdHeader = getHeader(event && event.headers, 'x-trace-id');
+  const traceId = sanitizeText(body.traceId || trace.id || traceIdHeader || '', 160) || null;
+
+  return {
+    traceId,
+    frontend: {
+      service: sanitizeText(frontend.service || frontend.name || '', 120) || null,
+      version: sanitizeText(frontend.version || body.frontendVersion || '', 120) || null,
+      region: sanitizeText(frontend.region || body.frontendRegion || '', 120) || null
+    },
+    backend: {
+      service: sanitizeText(backend.service || backend.name || '', 120) || null,
+      version: sanitizeText(backend.version || body.backendVersion || '', 120) || null,
+      region: sanitizeText(backend.region || body.backendRegion || '', 120) || null
+    }
+  };
+}
+
 async function ircCommand(event) {
   try {
     if (!validateBotToken(event)) {
@@ -923,6 +945,7 @@ async function incidentIngest(event) {
       }
     }
 
+    const translation = normalizeTraceEnvelope(event, body);
     const issue = body.issueKey ? await fetchIssueSummary(body.issueKey) : null;
     const question = body.question || 'A high-priority customer issue needs triage. What evidence should support accurate routing?';
 
@@ -930,7 +953,8 @@ async function incidentIngest(event) {
       channel,
       actor: body.actor || 'A9 Superchat Incident Ingest',
       text: question,
-      issue
+      issue,
+      translation
     });
 
     if (idempotencyKey) {
@@ -944,11 +968,11 @@ async function incidentIngest(event) {
       type: 'incident-ingest-accepted',
       channel,
       issueKey: issue ? issue.key : null,
-      traceId: body.traceId ? sanitizeText(body.traceId, 160) : null,
+      traceId: translation.traceId,
       idempotencyKey
     });
 
-    return jsonResponse(202, { ok: true, queued });
+    return jsonResponse(202, { ok: true, queued, translation });
   } catch (error) {
     await recordIncidentIngestEnvelope({
       type: 'incident-ingest-invalid',
@@ -986,6 +1010,7 @@ module.exports = {
     botContextKey,
     activeChannelContextKey,
     validateIngestSignature,
-    ingestIdempotencyKey
+    ingestIdempotencyKey,
+    normalizeTraceEnvelope
   }
 };
