@@ -407,7 +407,12 @@ async function fetchIssueSummary(issueKey) {
 
   const response = await api.asApp().requestJira(route`/rest/api/3/issue/${key}?fields=summary,status,priority,issuetype,description`);
   if (!response.ok) {
-    return { issueKey: key, unavailable: true };
+    return {
+      issueKey: key,
+      unavailable: true,
+      contextSource: 'jira-asApp',
+      contextStatus: 'unavailable'
+    };
   }
 
   const issue = await response.json();
@@ -416,7 +421,9 @@ async function fetchIssueSummary(issueKey) {
     summary: issue.fields && issue.fields.summary,
     status: issue.fields && issue.fields.status && issue.fields.status.name,
     priority: issue.fields && issue.fields.priority && issue.fields.priority.name,
-    issueType: issue.fields && issue.fields.issuetype && issue.fields.issuetype.name
+    issueType: issue.fields && issue.fields.issuetype && issue.fields.issuetype.name,
+    contextSource: 'jira-asApp',
+    contextStatus: 'ok'
   };
 }
 
@@ -500,7 +507,7 @@ async function rovoTriageAction(payload) {
     issue,
     source: 'rovo-action',
     workflow: 'jira-grounded-triage-ask',
-    correlationId
+    correlationId: `${correlationId}:${issue.contextStatus || 'unknown'}`
   });
 }
 

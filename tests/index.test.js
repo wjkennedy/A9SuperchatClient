@@ -129,9 +129,11 @@ test('queues Rovo triage message with Jira issue context', async () => {
 
   expect(result.channel).toBe('#p1');
   expect(result.issue.summary).toBe('Portal outage');
+  expect(result.issue.contextSource).toBe('jira-asApp');
+  expect(result.issue.contextStatus).toBe('ok');
   expect(result.source).toBe('rovo-action');
   expect(result.workflow).toBe('jira-grounded-triage-ask');
-  expect(result.correlationId).toMatch(/^[a-f0-9]{24}$/);
+  expect(result.correlationId).toMatch(/^[a-f0-9]{24}:ok$/);
   expect(mockStorage.set).toHaveBeenCalledTimes(2);
   expect(mockStorage.set.mock.calls[0][1].type).toBe('relay-message');
   expect(mockStorage.set.mock.calls[0][1].source).toBe('rovo-action');
@@ -139,6 +141,24 @@ test('queues Rovo triage message with Jira issue context', async () => {
   expect(mockStorage.set.mock.calls[1][0]).toBe(app._private.agentQueueKey());
   expect(mockStorage.set.mock.calls[1][1][0].source).toBe('rovo-action');
   expect(mockStorage.set.mock.calls[1][1][0].workflow).toBe('jira-grounded-triage-ask');
+});
+
+test('queues Rovo triage even when Jira context is unavailable', async () => {
+  mockRequestJira.mockResolvedValueOnce({
+    ok: false
+  });
+
+  const result = await app.rovoTriageAction({
+    issueKey: 'CS-999',
+    channel: '#p1',
+    question: 'What should support triage?'
+  });
+
+  expect(result.issue.unavailable).toBe(true);
+  expect(result.issue.contextSource).toBe('jira-asApp');
+  expect(result.issue.contextStatus).toBe('unavailable');
+  expect(result.correlationId).toMatch(/^[a-f0-9]{24}:unavailable$/);
+  expect(mockStorage.set).toHaveBeenCalledTimes(2);
 });
 
 test('bootstrap prefers Jira identity and storage settings', async () => {
